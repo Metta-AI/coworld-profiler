@@ -20,6 +20,7 @@ from coworld.api_client import CoworldApiClient
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fetch_episode import DEFAULT_SERVER, fetch  # noqa: E402
 
+UNSCALED = {"late %"}
 COLUMNS = [
     ("rtt p50", lambda r: r["websocket_application_rtt"]["p50_s"]),
     ("rtt p99", lambda r: r["websocket_application_rtt"]["p99_s"]),
@@ -29,7 +30,7 @@ COLUMNS = [
     ("tick lag p99", lambda r: r["game_tick_lag"]["p99_s"]),
     ("loop lag p99", lambda r: r["game_event_loop_lag"]["p99_s"]),
     ("gc max", lambda r: r["game_gc_pause"]["max_s"]),
-    ("late %", lambda r: None if r["action_late_fraction"] is None else r["action_late_fraction"] * 100 / 1000),
+    ("late %", lambda r: None if r["action_late_fraction"] is None else r["action_late_fraction"] * 100),
     ("ready max", lambda r: r["player_connect_ready_max_s"]),
     ("dns max", lambda r: max((s["player_connect_dns_s"] or 0) for s in r["slots"])),
     ("upgrade max", lambda r: max((s["player_connect_upgrade_s"] or 0) for s in r["slots"])),
@@ -38,8 +39,8 @@ COLUMNS = [
 ]
 
 
-def _cell(value: float | None) -> str:
-    return "-" if value is None else f"{value * 1000:.3f}"
+def _cell(value: float | None, *, scale: float = 1000) -> str:
+    return "-" if value is None else f"{value * scale:.3f}"
 
 
 def main() -> None:
@@ -73,7 +74,8 @@ def main() -> None:
     if args.markdown:
         print("|".join("---" for _ in header))
     for variant, episode_id, results in rows:
-        values = [variant, episode_id[:13], str(results["player_slot_count"])] + [_cell(fn(results)) for _, fn in COLUMNS]
+        cells = [_cell(fn(results), scale=1 if name in UNSCALED else 1000) for name, fn in COLUMNS]
+        values = [variant, episode_id[:13], str(results["player_slot_count"])] + cells
         print(sep.join(values))
     print()
     print("per-variant medians (ms)")
@@ -83,9 +85,9 @@ def main() -> None:
     for variant in dict.fromkeys(v for v, _, _ in rows):
         group = [r for v, _, r in rows if v == variant]
         cells = []
-        for _, fn in COLUMNS:
+        for name, fn in COLUMNS:
             values = [fn(r) for r in group if fn(r) is not None]
-            cells.append(_cell(statistics.median(values)) if values else "-")
+            cells.append(_cell(statistics.median(values), scale=1 if name in UNSCALED else 1000) if values else "-")
         print(sep.join([variant, str(len(group)), str(group[0]["player_slot_count"])] + cells))
 
 

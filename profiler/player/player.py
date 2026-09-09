@@ -247,7 +247,7 @@ class Player:
     async def _flush(self, connection: ClientConnection) -> None:
         self.recorder.add("lifecycle", {"event": "flush.received", "mono_ns": time.monotonic_ns()})
         self._publish(game_summary=None)
-        lag = summarize_ns([sample.lag_ns for sample in self.loop_lag.samples])
+        lag = summarize_ns([sample["lag_ns"] for sample in self.recorder.records("loop_lag")])
         reply = FlushReply(
             completed_timings=self.completed,
             clock_reports=self.clock_reports,
