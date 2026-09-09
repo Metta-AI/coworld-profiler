@@ -1,5 +1,7 @@
 # Hosted findings, 2026-09-09
 
+Superseded by the five-round research report in `docs/reports/hosted-timing-2026-09-09.md`; kept as the round 1 and 2 record.
+
 First measurements of the hosted Observatory episode path using
 coworld-profiler 0.1.0 (coworld `cow_f4c8de04-7d32-4bc8-a316-8cd8cda6a729`,
 image `coworld-profiler:coworld-8e682f09bc97`, source commit `d400b90`).

@@ -13,7 +13,11 @@ Design and the mapping to the platform's existing spans:
 Wire protocol: [docs/player-protocol.md](docs/player-protocol.md).
 What each number means and how to read it:
 [docs/measurement-reference.md](docs/measurement-reference.md).
-First hosted measurements:
+The research report on five rounds of hosted measurements (100 episodes):
+[docs/reports/hosted-timing-2026-09-09.html](docs/reports/hosted-timing-2026-09-09.html)
+(commentable HTML) and its markdown twin
+[docs/reports/hosted-timing-2026-09-09.md](docs/reports/hosted-timing-2026-09-09.md).
+The earlier two-round write-up is
 [docs/results/2026-09-09-hosted-findings.md](docs/results/2026-09-09-hosted-findings.md).
 
 ## Layout
