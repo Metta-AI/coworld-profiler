@@ -1,0 +1,1369 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Metta-AI/metta/main/packages/coworld/src/coworld/coworld_manifest_schema.json",
+  "tags": [
+    "profiling",
+    "infrastructure",
+    "multiplayer"
+  ],
+  "game": {
+    "name": "profiler",
+    "description": "A Coworld that exists only to measure: websocket round trips between game and player pods, connect stages, startup milestones, tick lag, action staleness, loop lag, CPU throttling, GC, and artifact write times.",
+    "owner": "james@softmax.com",
+    "player_runtime": "platform-hosted",
+    "runnable": {
+      "type": "game",
+      "image": "{{PROFILER_IMAGE}}",
+      "run": [
+        "python",
+        "-m",
+        "profiler.game.server"
+      ],
+      "source_url": "https://github.com/Metta-AI/coworld-profiler/tree/main"
+    },
+    "config_schema": {
+      "$defs": {
+        "PayloadCell": {
+          "properties": {
+            "cell_id": {
+              "minLength": 1,
+              "title": "Cell Id",
+              "type": "string"
+            },
+            "target_bytes": {
+              "maximum": 4194304,
+              "minimum": 64,
+              "title": "Target Bytes",
+              "type": "integer"
+            },
+            "warmup_ticks": {
+              "minimum": 0,
+              "title": "Warmup Ticks",
+              "type": "integer"
+            },
+            "measure_ticks": {
+              "minimum": 1,
+              "title": "Measure Ticks",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cell_id",
+            "target_bytes",
+            "warmup_ticks",
+            "measure_ticks"
+          ],
+          "title": "PayloadCell",
+          "type": "object"
+        },
+        "PlayerName": {
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "PlayerName",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "tokens": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Tokens",
+          "type": "array"
+        },
+        "players": {
+          "items": {
+            "$ref": "#/$defs/PlayerName"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Players",
+          "type": "array"
+        },
+        "seed": {
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "fixed_tick",
+          "enum": [
+            "fixed_tick",
+            "blocking"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "step_seconds": {
+          "default": 0.02,
+          "exclusiveMinimum": 0,
+          "maximum": 1.0,
+          "title": "Step Seconds",
+          "type": "number"
+        },
+        "decision_timeout_seconds": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Decision Timeout Seconds",
+          "type": "number"
+        },
+        "cells": {
+          "items": {
+            "$ref": "#/$defs/PayloadCell"
+          },
+          "minItems": 1,
+          "title": "Cells",
+          "type": "array"
+        },
+        "player_connect_timeout_seconds": {
+          "default": 180,
+          "minimum": 0,
+          "title": "Player Connect Timeout Seconds",
+          "type": "number"
+        },
+        "drain_seconds": {
+          "default": 15.0,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Drain Seconds",
+          "type": "number"
+        },
+        "clock_probes_per_window": {
+          "default": 8,
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Clock Probes Per Window",
+          "type": "integer"
+        },
+        "resource_sample_seconds": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Resource Sample Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tokens",
+        "players",
+        "seed",
+        "cells"
+      ],
+      "title": "GameConfig",
+      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "results_schema": {
+      "$defs": {
+        "CellResult": {
+          "properties": {
+            "cell_id": {
+              "title": "Cell Id",
+              "type": "string"
+            },
+            "payload_target_bytes": {
+              "title": "Payload Target Bytes",
+              "type": "integer"
+            },
+            "observation_bytes": {
+              "title": "Observation Bytes",
+              "type": "integer"
+            },
+            "measure_ticks": {
+              "title": "Measure Ticks",
+              "type": "integer"
+            },
+            "player_turn_duration": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "websocket_application_rtt": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "websocket_transport_residual": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "game_encode": {
+              "$ref": "#/$defs/Distribution"
+            }
+          },
+          "required": [
+            "cell_id",
+            "payload_target_bytes",
+            "observation_bytes",
+            "measure_ticks",
+            "player_turn_duration",
+            "websocket_application_rtt",
+            "websocket_transport_residual",
+            "game_encode"
+          ],
+          "title": "CellResult",
+          "type": "object"
+        },
+        "Distribution": {
+          "description": "Nearest-rank percentiles in seconds over a list of nanosecond samples.",
+          "properties": {
+            "count": {
+              "title": "Count",
+              "type": "integer"
+            },
+            "sum_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sum S"
+            },
+            "p50_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P50 S"
+            },
+            "p90_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P90 S"
+            },
+            "p99_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "P99 S"
+            },
+            "max_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max S"
+            }
+          },
+          "required": [
+            "count",
+            "sum_s",
+            "p50_s",
+            "p90_s",
+            "p99_s",
+            "max_s"
+          ],
+          "title": "Distribution",
+          "type": "object"
+        },
+        "SlotResult": {
+          "properties": {
+            "player_slot": {
+              "title": "Player Slot",
+              "type": "integer"
+            },
+            "policy": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Policy"
+            },
+            "connected": {
+              "title": "Connected",
+              "type": "boolean"
+            },
+            "connect_attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Connect Attempts"
+            },
+            "player_connect_dns_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Connect Dns S"
+            },
+            "player_connect_tcp_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Connect Tcp S"
+            },
+            "player_connect_upgrade_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Connect Upgrade S"
+            },
+            "player_connect_ready_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Connect Ready S"
+            },
+            "player_turn_duration": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "websocket_application_rtt": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "player_processing_duration": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "player_think_cpu": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "websocket_transport_residual": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "game_websocket_send_await": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "player_websocket_send_await": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "ping_rtt": {
+              "$ref": "#/$defs/Distribution"
+            },
+            "observation_count": {
+              "title": "Observation Count",
+              "type": "integer"
+            },
+            "applied_count": {
+              "title": "Applied Count",
+              "type": "integer"
+            },
+            "late_discarded_count": {
+              "title": "Late Discarded Count",
+              "type": "integer"
+            },
+            "unanswered_count": {
+              "title": "Unanswered Count",
+              "type": "integer"
+            },
+            "dropped_before_send_count": {
+              "title": "Dropped Before Send Count",
+              "type": "integer"
+            },
+            "timeout_count": {
+              "title": "Timeout Count",
+              "type": "integer"
+            },
+            "timing_report_missing_count": {
+              "title": "Timing Report Missing Count",
+              "type": "integer"
+            },
+            "negative_residual_count": {
+              "title": "Negative Residual Count",
+              "type": "integer"
+            },
+            "clock_offset_ns": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Clock Offset Ns"
+            },
+            "clock_offset_lower_ns": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Clock Offset Lower Ns"
+            },
+            "clock_offset_upper_ns": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Clock Offset Upper Ns"
+            },
+            "clock_probe_delay_ns": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Clock Probe Delay Ns"
+            },
+            "clock_probe_valid_count": {
+              "title": "Clock Probe Valid Count",
+              "type": "integer"
+            },
+            "player_loop_lag_p99_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Loop Lag P99 S"
+            },
+            "player_artifact_publish_s": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Artifact Publish S"
+            },
+            "player_artifact_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Artifact Bytes"
+            },
+            "player_artifact_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Player Artifact Error"
+            }
+          },
+          "required": [
+            "player_slot",
+            "policy",
+            "connected",
+            "connect_attempts",
+            "player_connect_dns_s",
+            "player_connect_tcp_s",
+            "player_connect_upgrade_s",
+            "player_connect_ready_s",
+            "player_turn_duration",
+            "websocket_application_rtt",
+            "player_processing_duration",
+            "player_think_cpu",
+            "websocket_transport_residual",
+            "game_websocket_send_await",
+            "player_websocket_send_await",
+            "ping_rtt",
+            "observation_count",
+            "applied_count",
+            "late_discarded_count",
+            "unanswered_count",
+            "dropped_before_send_count",
+            "timeout_count",
+            "timing_report_missing_count",
+            "negative_residual_count",
+            "clock_offset_ns",
+            "clock_offset_lower_ns",
+            "clock_offset_upper_ns",
+            "clock_probe_delay_ns",
+            "clock_probe_valid_count",
+            "player_loop_lag_p99_s",
+            "player_artifact_publish_s",
+            "player_artifact_bytes",
+            "player_artifact_error"
+          ],
+          "title": "SlotResult",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "The results artifact. `extra=\"forbid\"` makes the generated schema close the object.",
+      "properties": {
+        "schema_version": {
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "scores": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Scores",
+          "type": "array"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "seed": {
+          "title": "Seed",
+          "type": "integer"
+        },
+        "player_slot_count": {
+          "title": "Player Slot Count",
+          "type": "integer"
+        },
+        "step_seconds": {
+          "title": "Step Seconds",
+          "type": "number"
+        },
+        "step_count": {
+          "title": "Step Count",
+          "type": "integer"
+        },
+        "warmup_step_count": {
+          "title": "Warmup Step Count",
+          "type": "integer"
+        },
+        "measurement_complete": {
+          "title": "Measurement Complete",
+          "type": "boolean"
+        },
+        "game_bootstrap_import_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Bootstrap Import S"
+        },
+        "game_bootstrap_config_read_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Bootstrap Config Read S"
+        },
+        "game_bootstrap_config_decode_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Bootstrap Config Decode S"
+        },
+        "game_bootstrap_payload_build_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Bootstrap Payload Build S"
+        },
+        "game_bootstrap_server_start_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Bootstrap Server Start S"
+        },
+        "game_process_birth_to_first_mark_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Process Birth To First Mark S"
+        },
+        "game_listening_to_first_health_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Listening To First Health S"
+        },
+        "game_listening_to_first_global_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Listening To First Global S"
+        },
+        "player_connect_ready_max_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Player Connect Ready Max S"
+        },
+        "player_connect_ready_min_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Player Connect Ready Min S"
+        },
+        "episode_loop_measurement_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Episode Loop Measurement S"
+        },
+        "game_step_duration": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "game_tick_lag": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "game_event_loop_lag": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "game_gc_pause": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "player_turn_duration": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "websocket_application_rtt": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "websocket_transport_residual": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "player_turn_duration_worst_slot_p99_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Player Turn Duration Worst Slot P99 S"
+        },
+        "action_late_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Action Late Fraction"
+        },
+        "action_unanswered_count": {
+          "title": "Action Unanswered Count",
+          "type": "integer"
+        },
+        "observation_dropped_count": {
+          "title": "Observation Dropped Count",
+          "type": "integer"
+        },
+        "timing_report_missing_count": {
+          "title": "Timing Report Missing Count",
+          "type": "integer"
+        },
+        "game_cpu_throttled_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Cpu Throttled S"
+        },
+        "game_memory_peak_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Game Memory Peak Bytes"
+        },
+        "replay_size_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Replay Size Bytes"
+        },
+        "replay_prepare_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Replay Prepare S"
+        },
+        "replay_publish_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Replay Publish S"
+        },
+        "player_artifact_success_count": {
+          "title": "Player Artifact Success Count",
+          "type": "integer"
+        },
+        "trace_dropped_record_count": {
+          "title": "Trace Dropped Record Count",
+          "type": "integer"
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/SlotResult"
+          },
+          "title": "Slots",
+          "type": "array"
+        },
+        "cells": {
+          "items": {
+            "$ref": "#/$defs/CellResult"
+          },
+          "title": "Cells",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scores",
+        "run_id",
+        "mode",
+        "seed",
+        "player_slot_count",
+        "step_seconds",
+        "step_count",
+        "warmup_step_count",
+        "measurement_complete",
+        "game_bootstrap_import_s",
+        "game_bootstrap_config_read_s",
+        "game_bootstrap_config_decode_s",
+        "game_bootstrap_payload_build_s",
+        "game_bootstrap_server_start_s",
+        "game_process_birth_to_first_mark_s",
+        "game_listening_to_first_health_s",
+        "game_listening_to_first_global_s",
+        "player_connect_ready_max_s",
+        "player_connect_ready_min_s",
+        "episode_loop_measurement_s",
+        "game_step_duration",
+        "game_tick_lag",
+        "game_event_loop_lag",
+        "game_gc_pause",
+        "player_turn_duration",
+        "websocket_application_rtt",
+        "websocket_transport_residual",
+        "player_turn_duration_worst_slot_p99_s",
+        "action_late_fraction",
+        "action_unanswered_count",
+        "observation_dropped_count",
+        "timing_report_missing_count",
+        "game_cpu_throttled_s",
+        "game_memory_peak_bytes",
+        "replay_size_bytes",
+        "replay_prepare_s",
+        "replay_publish_s",
+        "player_artifact_success_count",
+        "trace_dropped_record_count",
+        "slots"
+      ],
+      "title": "Results",
+      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "protocols": {
+      "player": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/coworld-profiler/blob/main/docs/player-protocol.md"
+      },
+      "global": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/coworld-profiler/blob/main/docs/player-protocol.md#global-viewer"
+      }
+    },
+    "docs": {
+      "readme": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/coworld-profiler/blob/main/README.md"
+      },
+      "pages": [
+        {
+          "id": "measurement-reference",
+          "title": "measurement-reference.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-profiler/blob/main/docs/measurement-reference.md"
+          }
+        },
+        {
+          "id": "design",
+          "title": "design.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-profiler/blob/main/docs/designs/2026-09-09-profiler-design.md"
+          }
+        }
+      ]
+    }
+  },
+  "player": [
+    {
+      "id": "profiler-echo",
+      "name": "Profiler Echo",
+      "type": "player",
+      "image": "{{PROFILER_IMAGE}}",
+      "run": [
+        "python",
+        "-m",
+        "profiler.player.player",
+        "--policy",
+        "echo"
+      ],
+      "source_url": "https://github.com/Metta-AI/coworld-profiler/tree/main/profiler/player",
+      "description": "Instrumented player that decodes, replies noop, and reports every stage's timestamps."
+    },
+    {
+      "id": "profiler-busy-5ms",
+      "name": "Profiler Busy 5ms",
+      "type": "player",
+      "image": "{{PROFILER_IMAGE}}",
+      "run": [
+        "python",
+        "-m",
+        "profiler.player.player",
+        "--policy",
+        "busy",
+        "--think-cpu-ms",
+        "5"
+      ],
+      "source_url": "https://github.com/Metta-AI/coworld-profiler/tree/main/profiler/player",
+      "description": "Echo plus 5 ms of thread CPU per turn, to emulate real think time and expose CPU throttling."
+    },
+    {
+      "id": "profiler-slow-start-20s",
+      "name": "Profiler Slow Start 20s",
+      "type": "player",
+      "image": "{{PROFILER_IMAGE}}",
+      "run": [
+        "python",
+        "-m",
+        "profiler.player.player",
+        "--policy",
+        "slow-start",
+        "--connect-delay-seconds",
+        "20"
+      ],
+      "source_url": "https://github.com/Metta-AI/coworld-profiler/tree/main/profiler/player",
+      "description": "Echo that sleeps 20 s before its first connect, to probe connect-timeout and lobby behaviour."
+    }
+  ],
+  "variants": [
+    {
+      "id": "baseline-2p-20ms",
+      "name": "Baseline 2p 20ms",
+      "description": "Two echo slots, 1 KiB observations, 20 ms fixed tick: round trip, scheduling, and startup baseline.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "fanout-4p",
+      "name": "Fan-out 4p",
+      "description": "Baseline with four slots.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          },
+          {
+            "name": "profiler 2"
+          },
+          {
+            "name": "profiler 3"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "fanout-8p",
+      "name": "Fan-out 8p",
+      "description": "Baseline with eight slots.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          },
+          {
+            "name": "profiler 2"
+          },
+          {
+            "name": "profiler 3"
+          },
+          {
+            "name": "profiler 4"
+          },
+          {
+            "name": "profiler 5"
+          },
+          {
+            "name": "profiler 6"
+          },
+          {
+            "name": "profiler 7"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "fanout-16p",
+      "name": "Fan-out 16p",
+      "description": "Baseline with sixteen slots.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          },
+          {
+            "name": "profiler 2"
+          },
+          {
+            "name": "profiler 3"
+          },
+          {
+            "name": "profiler 4"
+          },
+          {
+            "name": "profiler 5"
+          },
+          {
+            "name": "profiler 6"
+          },
+          {
+            "name": "profiler 7"
+          },
+          {
+            "name": "profiler 8"
+          },
+          {
+            "name": "profiler 9"
+          },
+          {
+            "name": "profiler 10"
+          },
+          {
+            "name": "profiler 11"
+          },
+          {
+            "name": "profiler 12"
+          },
+          {
+            "name": "profiler 13"
+          },
+          {
+            "name": "profiler 14"
+          },
+          {
+            "name": "profiler 15"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "tick-2p-24fps",
+      "name": "Tick 2p 24fps",
+      "description": "Baseline at the 24 fps tick Crewrift and CTF use.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.041666666666666664,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "tick-2p-50ms",
+      "name": "Tick 2p 50ms",
+      "description": "Baseline at the 50 ms tick hungercog defaults to.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.05,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "payload-sweep",
+      "name": "Payload sweep",
+      "description": "Two passes over 1 KiB, 16 KiB, 256 KiB, and 2 MiB observations, 10 warmup and 100 measured ticks each; second pass in reverse order.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-16k",
+            "target_bytes": 16384,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-256k",
+            "target_bytes": 262144,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-2m",
+            "target_bytes": 2097152,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-2m-b",
+            "target_bytes": 2097152,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-256k-b",
+            "target_bytes": 262144,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-16k-b",
+            "target_bytes": 16384,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          },
+          {
+            "cell_id": "json-1k-b",
+            "target_bytes": 1024,
+            "warmup_ticks": 10,
+            "measure_ticks": 100
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    },
+    {
+      "id": "blocking-turns",
+      "name": "Blocking turns",
+      "description": "Round-robin blocking decisions with a 2 s per-decision deadline, the shape of the cogweb turn-based games.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "blocking",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 1000
+          }
+        ],
+        "player_connect_timeout_seconds": 180,
+        "decision_timeout_seconds": 2.0
+      }
+    },
+    {
+      "id": "long-10000-ticks",
+      "name": "Long 10000 ticks",
+      "description": "Ten thousand measured ticks at 20 ms: GC, keepalive, clock drift, sustained node variance.",
+      "game_config": {
+        "players": [
+          {
+            "name": "profiler 0"
+          },
+          {
+            "name": "profiler 1"
+          }
+        ],
+        "seed": 20260909,
+        "mode": "fixed_tick",
+        "step_seconds": 0.02,
+        "cells": [
+          {
+            "cell_id": "json-1k",
+            "target_bytes": 1024,
+            "warmup_ticks": 100,
+            "measure_ticks": 10000
+          }
+        ],
+        "player_connect_timeout_seconds": 180
+      }
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "players": [
+        {
+          "name": "profiler 0"
+        },
+        {
+          "name": "profiler 1"
+        }
+      ],
+      "seed": 1,
+      "mode": "fixed_tick",
+      "step_seconds": 0.02,
+      "cells": [
+        {
+          "cell_id": "json-1k",
+          "target_bytes": 1024,
+          "warmup_ticks": 2,
+          "measure_ticks": 20
+        }
+      ],
+      "player_connect_timeout_seconds": 180,
+      "drain_seconds": 10
+    },
+    "players": [
+      {
+        "player_id": "profiler-echo"
+      },
+      {
+        "player_id": "profiler-echo"
+      }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<title>coworld-profiler player seat</title>
+<style>
+  :root { color-scheme: light; --ink: #1f1b16; --muted: #6b6259; --paper: #faf8f4; --line: #dcd6cc; }
+  body { background: var(--paper); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 28px; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  pre { background: #f1ede6; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+</style>
+<main>
+  <h1>Player seat</h1>
+  <p class="muted">This seat belongs to a policy container. The page shows the slot's hello and per-tick observation sizes; it does not play.</p>
+  <div id="status" class="muted">connecting</div>
+  <pre id="log"></pre>
+</main>
+<script>
+  const params = new URLSearchParams(location.search);
+  const address = params.get("address") || `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/player?slot=${params.get("slot")}&token=${params.get("token")}`;
+  const socket = new WebSocket(address);
+  const log = document.getElementById("log");
+  let count = 0;
+  socket.onopen = () => { document.getElementById("status").textContent = "connected"; };
+  socket.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === "hello") {
+      log.textContent += `hello slot=${message.slot} of ${message.slot_count} mode=${message.mode} step=${message.step_seconds}s\n`;
+      socket.send(JSON.stringify({ type: "hello", startup: { first_mark_wall_ns: Date.now() * 1e6, birth_to_first_mark_ns: null, imports_ns: 0, env_read_ns: 0, connect_delay_ns: 0, attempts: [], connected_mono_ns: 0, policy: "browser", think_cpu_target_ms: 0, python_version: "n/a", websockets_version: navigator.userAgent } }));
+    } else if (message.type === "observation") {
+      count += 1;
+      if (count % 25 === 1) log.textContent += `observation tick=${message.tick} ${message.phase} ${message.cell_id} ${event.data.length} bytes\n`;
+      socket.send(JSON.stringify({ type: "action", run_id: message.run_id, reply_to: message.seq, action: "noop", completed_timings: [], clock_reports: [] }));
+    } else if (message.type === "clock_probe") {
+      socket.send(JSON.stringify({ type: "clock_reply", probe_id: message.probe_id }));
+    } else if (message.type === "flush") {
+      socket.send(JSON.stringify({ type: "flush_reply", completed_timings: [], clock_reports: [], ping_rtts_ns: [], loop_lag_p99_ns: null, artifact_publish_ns: null, artifact_bytes: null, artifact_error: null }));
+    } else if (message.type === "final") {
+      log.textContent += `final: rtt p50 ${(message.game_summary.results.websocket_application_rtt.p50_s * 1000).toFixed(2)} ms\n`;
+    }
+  };
+  socket.onclose = () => { document.getElementById("status").textContent = "closed"; };
+</script>

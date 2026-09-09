@@ -1,0 +1,7 @@
+services:
+  profiler:
+    image: coworld-profiler:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile

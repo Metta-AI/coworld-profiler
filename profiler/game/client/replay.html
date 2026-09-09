@@ -1,0 +1,87 @@
+<!doctype html>
+<title>coworld-profiler replay</title>
+<style>
+  :root { color-scheme: light; --ink: #1f1b16; --muted: #6b6259; --paper: #faf8f4; --line: #dcd6cc; }
+  body { background: var(--paper); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 28px; }
+  main { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0 0 2px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 26px 0 8px; }
+  .muted { color: var(--muted); }
+  canvas { width: 100%; height: 220px; display: block; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-weight: 600; color: var(--muted); padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 4px 14px 4px 0; }
+  .legend span { display: inline-block; margin-right: 14px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 5px; margin-right: 5px; vertical-align: middle; }
+</style>
+<main>
+  <h1>coworld-profiler replay</h1>
+  <div class="muted" id="meta">loading</div>
+  <h2>Application round trip per slot (ms, measured phase)</h2>
+  <div class="legend" id="legend"></div>
+  <canvas id="rtt"></canvas>
+  <h2>Transport residual per slot (ms): RTT minus player processing</h2>
+  <canvas id="residual"></canvas>
+  <h2>Tick scheduling lag (ms)</h2>
+  <canvas id="lag"></canvas>
+  <h2>Summary</h2>
+  <table id="summary"></table>
+  <h2>Per slot</h2>
+  <table id="slots"></table>
+</main>
+<script>
+  const COLORS = ["#1f1b16", "#b3542a", "#2a6f97", "#6a994e", "#8e5ea2", "#c9a227", "#d1495b", "#3d7068", "#7f4f24", "#4a5759", "#a44a3f", "#5b8e7d", "#bc4b51", "#5c6b73", "#e07a5f", "#3a506b"];
+  const params = new URLSearchParams(location.search);
+  const address = params.get("address") || `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/replay`;
+  const ms = v => v == null ? "-" : (v * 1000).toFixed(3);
+  const nsToMs = v => v == null ? null : v / 1e6;
+
+  function draw(canvasId, seriesBySlot, key) {
+    const canvas = document.getElementById(canvasId);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * dpr; canvas.height = 220 * dpr;
+    const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
+    const W = canvas.clientWidth, H = 220, L = 44, B = 22;
+    const points = Object.values(seriesBySlot).flat().map(p => nsToMs(p[key])).filter(v => v != null);
+    if (!points.length) return;
+    const sorted = [...points].sort((a, b) => a - b);
+    const yMax = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.995))] * 1.15 || 1;
+    const ticks = Math.max(...Object.values(seriesBySlot).flat().map(p => p.tick)) || 1;
+    ctx.strokeStyle = "#dcd6cc"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) { const y = H - B - (H - B - 8) * i / 4; ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W, y); ctx.stroke(); ctx.fillStyle = "#6b6259"; ctx.font = "11px system-ui"; ctx.fillText((yMax * i / 4).toFixed(1), 2, y + 4); }
+    Object.entries(seriesBySlot).forEach(([slot, items]) => {
+      ctx.strokeStyle = COLORS[Number(slot) % COLORS.length]; ctx.lineWidth = 1.2; ctx.beginPath(); let started = false;
+      items.forEach(p => { const v = nsToMs(p[key]); if (v == null) { started = false; return; } const x = L + (W - L) * p.tick / ticks; const y = H - B - (H - B - 8) * Math.min(v, yMax) / yMax; if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y); });
+      ctx.stroke();
+    });
+  }
+
+  const socket = new WebSocket(address);
+  socket.onmessage = event => {
+    const replay = JSON.parse(event.data);
+    const h = replay.header || {}, s = replay.summary || {};
+    document.getElementById("meta").textContent = `run ${s.run_id || "?"} · ${s.mode} · ${s.player_slot_count} slots · step ${s.step_seconds}s · ${s.step_count} measured ticks · python ${(h.versions || {}).python || "?"}`;
+    const measured = {};
+    Object.entries(replay.slots || {}).forEach(([slot, items]) => { measured[slot] = items.filter(p => p.phase === "measure"); });
+    document.getElementById("legend").innerHTML = Object.keys(measured).map(slot => `<span><i style="background:${COLORS[Number(slot) % COLORS.length]}"></i>slot ${slot}</span>`).join("");
+    draw("rtt", measured, "rtt_ns");
+    draw("residual", measured, "residual_ns");
+    draw("lag", { 0: (replay.steps || []).filter(p => p.phase === "measure") }, "lag_ns");
+    const rows = [
+      ["application RTT p50 / p90 / p99 / max (ms)", [s.websocket_application_rtt].filter(Boolean).map(d => `${ms(d.p50_s)} / ${ms(d.p90_s)} / ${ms(d.p99_s)} / ${ms(d.max_s)}`)[0]],
+      ["transport residual p50 / p99 (ms)", [s.websocket_transport_residual].filter(Boolean).map(d => `${ms(d.p50_s)} / ${ms(d.p99_s)}`)[0]],
+      ["player turn p50 / p99 (ms)", [s.player_turn_duration].filter(Boolean).map(d => `${ms(d.p50_s)} / ${ms(d.p99_s)}`)[0]],
+      ["game step p50 / max (ms)", [s.game_step_duration].filter(Boolean).map(d => `${ms(d.p50_s)} / ${ms(d.max_s)}`)[0]],
+      ["tick lag p99 / max (ms)", [s.game_tick_lag].filter(Boolean).map(d => `${ms(d.p99_s)} / ${ms(d.max_s)}`)[0]],
+      ["event loop lag p99 (ms)", [s.game_event_loop_lag].filter(Boolean).map(d => ms(d.p99_s))[0]],
+      ["late action fraction", s.action_late_fraction == null ? "-" : (100 * s.action_late_fraction).toFixed(2) + " %"],
+      ["bootstrap imports / config / server start (ms)", `${ms(s.game_bootstrap_import_s)} / ${ms(s.game_bootstrap_config_read_s)} / ${ms(s.game_bootstrap_server_start_s)}`],
+      ["listening to first health / first global (ms)", `${ms(s.game_listening_to_first_health_s)} / ${ms(s.game_listening_to_first_global_s)}`],
+      ["slot ready min / max (ms)", `${ms(s.player_connect_ready_min_s)} / ${ms(s.player_connect_ready_max_s)}`],
+    ];
+    document.getElementById("summary").innerHTML = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v ?? "-"}</td></tr>`).join("");
+    const slots = s.slots || [];
+    document.getElementById("slots").innerHTML = `<tr><th>slot</th><th>policy</th><th>dns</th><th>tcp</th><th>upgrade</th><th>ready</th><th>rtt p50</th><th>rtt p99</th><th>proc p50</th><th>residual p50</th><th>ping p50</th><th>applied</th><th>late</th><th>offset ms</th></tr>` +
+      slots.map(x => `<tr><td>${x.player_slot}</td><td>${x.policy ?? "-"}</td><td>${ms(x.player_connect_dns_s)}</td><td>${ms(x.player_connect_tcp_s)}</td><td>${ms(x.player_connect_upgrade_s)}</td><td>${ms(x.player_connect_ready_s)}</td><td>${ms(x.websocket_application_rtt.p50_s)}</td><td>${ms(x.websocket_application_rtt.p99_s)}</td><td>${ms(x.player_processing_duration.p50_s)}</td><td>${ms(x.websocket_transport_residual.p50_s)}</td><td>${ms(x.ping_rtt.p50_s)}</td><td>${x.applied_count}</td><td>${x.late_discarded_count + x.unanswered_count + x.timeout_count}</td><td>${x.clock_offset_ns == null ? "-" : (x.clock_offset_ns / 1e6).toFixed(3)}</td></tr>`).join("");
+  };
+</script>

@@ -1,0 +1,43 @@
+[project]
+name = "coworld-profiler"
+version = "0.1.0"
+description = "A Coworld that exists only to measure hosted episode timing the platform does not instrument."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.34.2",
+    "websockets==15.0.1",
+    "pydantic>=2.9,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "pytest-timeout>=2.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 150
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["profiler"]
+
+[tool.ruff.lint.per-file-ignores]
+"tools/analyze_replay.py" = ["E501"]

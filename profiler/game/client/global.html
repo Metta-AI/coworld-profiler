@@ -1,0 +1,63 @@
+<!doctype html>
+<title>coworld-profiler viewer</title>
+<style>
+  :root { color-scheme: light; --ink: #1f1b16; --muted: #6b6259; --paper: #faf8f4; --line: #dcd6cc; }
+  body { background: var(--paper); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 28px; }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 18px; margin: 18px 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-weight: 600; color: var(--muted); padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 10px 6px 0; }
+  #bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 10px 0 22px; }
+  #fill { height: 100%; width: 0; background: var(--ink); transition: width .5s; }
+</style>
+<main>
+  <h1>coworld-profiler</h1>
+  <div class="muted" id="stage">connecting</div>
+  <div id="bar"><div id="fill"></div></div>
+  <dl>
+    <dt>mode</dt><dd id="mode">-</dd>
+    <dt>step</dt><dd id="step">-</dd>
+    <dt>slots ready</dt><dd id="ready">-</dd>
+    <dt>tick</dt><dd id="tick">-</dd>
+  </dl>
+  <section id="resultsSection" hidden>
+    <h2 style="font-size:17px;margin:24px 0 8px">Results</h2>
+    <table id="results"></table>
+  </section>
+</main>
+<script>
+  const params = new URLSearchParams(location.search);
+  const address = params.get("address") || `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/global`;
+  const socket = new WebSocket(address);
+  const el = id => document.getElementById(id);
+  const seconds = v => v == null ? "-" : (v * 1000).toFixed(2) + " ms";
+  socket.onmessage = event => {
+    const state = JSON.parse(event.data);
+    el("stage").textContent = state.stage + (state.done ? " (done)" : "");
+    el("mode").textContent = state.mode + " @ " + state.step_seconds + " s";
+    el("step").textContent = state.tick + " / " + state.total_ticks;
+    el("ready").textContent = (state.ready || []).length + " / " + state.slot_count;
+    el("tick").textContent = state.tick;
+    el("fill").style.width = state.total_ticks ? (100 * state.tick / state.total_ticks) + "%" : "0";
+    if (state.results) {
+      const r = state.results;
+      const rows = [
+        ["application RTT p50 / p99", seconds(r.websocket_application_rtt.p50_s) + " / " + seconds(r.websocket_application_rtt.p99_s)],
+        ["transport residual p50 / p99", seconds(r.websocket_transport_residual.p50_s) + " / " + seconds(r.websocket_transport_residual.p99_s)],
+        ["player turn p50 / p99", seconds(r.player_turn_duration.p50_s) + " / " + seconds(r.player_turn_duration.p99_s)],
+        ["game step p50 / max", seconds(r.game_step_duration.p50_s) + " / " + seconds(r.game_step_duration.max_s)],
+        ["tick lag p99 / max", seconds(r.game_tick_lag.p99_s) + " / " + seconds(r.game_tick_lag.max_s)],
+        ["late action fraction", r.action_late_fraction == null ? "-" : (100 * r.action_late_fraction).toFixed(2) + " %"],
+        ["slot ready max", seconds(r.player_connect_ready_max_s)],
+      ];
+      el("results").innerHTML = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+      el("resultsSection").hidden = false;
+    }
+  };
+  socket.onclose = () => { el("stage").textContent += " · connection closed"; };
+</script>
