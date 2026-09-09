@@ -76,3 +76,38 @@ It emits no telemetry from the cluster. Everything crosses the boundary as
 artifacts the platform already collects. It does not change the runner and
 it does not add spans; the design doc lists which existing gaps it explains
 and which it can only bound.
+
+## Comparing hosted traces
+
+`tools/fetch_spans.py JOBS_JSON OUTPUT_DIR` finds each job's lifecycle trace
+and follows Datadog's pagination through the currently indexed spans in the
+requested time window. This does not prove that every original span was retained.
+Use `--refresh` to refetch existing files after late spans arrive, and
+`--from 2026-09-09T00:00:00Z --to 2026-09-10T00:00:00Z` for an older window.
+Timeouts or partial-result warnings fail the run before replacing that job's saved trace.
+The run stops on the first error. Completed jobs are checkpointed in the index;
+fix the query or use a filtered jobs file to continue past an ambiguous job. Refresh merges by span ID, preserving
+older spans outside the query window. Missing roots retain previous files with a
+warning. Trace files and the index are replaced atomically.
+A completed fetch does not prove that Datadog has finished indexing late spans.
+
+The tool uses the existing standard-library HTTP client and Datadog's
+[search pagination contract](https://docs.datadoghq.com/api/latest/spans/search-spans/).
+No additional SDK is needed for this single endpoint. Run it through the token
+broker with a session ID and the `datadog.read` scope; never save API keys.
+
+`tools/reconcile_spans.py SPANS_DIR RESULTS_DIR...` preserves groups by operation,
+Pod role and identity, player slot, and resource. UID is preferred, followed by
+Pod name or span ID when older records lack a Pod identifier. Missing slots
+remain unknown. The distribution table aggregates across recorded Pods. Repeated names never silently choose the
+last container or player. Ambiguous single-span summaries are omitted. Game-pod
+image-pull totals sum container durations; overlapping pulls are not elapsed job
+time. Explicit viewer waits and historical derived gaps are reported separately; neither
+measures the game's first turn. The separate player-startup interval measures the
+worker's status observation, not a player handshake.
+
+The resource table also understands the accompanying Metta instrumentation's
+`container.run`, `player.pod_create`, and `player.startup_observed` operations.
+Older saved traces do not contain those records. The aggregate startup gate
+(`player.startup_wait`) and each player's observed startup are different intervals.
+An empty trace response is reported and leaves the previous snapshot untouched.
