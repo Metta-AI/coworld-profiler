@@ -183,7 +183,7 @@ class GameRuntime:
         await asyncio.sleep(0.5)  # let players re-publish their zips with the summary before sockets close
 
         replay_prepare_begin = time.monotonic_ns()
-        self.recorder.add("summary", summary)
+        self.recorder.add("summary", provisional.model_dump(mode="json"))
         replay_bytes = self.recorder.to_gzip_jsonl_stream(
             {
                 "schema_version": SCHEMA_VERSION,
