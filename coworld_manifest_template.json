@@ -962,8 +962,8 @@
       "description": "Echo plus 5 ms of thread CPU per turn, to emulate real think time and expose CPU throttling."
     },
     {
-      "id": "profiler-slow-start-20s",
-      "name": "Profiler Slow Start 20s",
+      "id": "profiler-slow-start-5s",
+      "name": "Profiler Slow Start 5s",
       "type": "player",
       "image": "{{PROFILER_IMAGE}}",
       "run": [
@@ -973,10 +973,10 @@
         "--policy",
         "slow-start",
         "--connect-delay-seconds",
-        "20"
+        "5"
       ],
       "source_url": "https://github.com/Metta-AI/coworld-profiler/tree/main/profiler/player",
-      "description": "Echo that sleeps 20 s before its first connect, to probe connect-timeout and lobby behaviour."
+      "description": "Echo that sleeps 5 s before its first connect, to probe lobby waiting and connect-timeout behaviour."
     }
   ],
   "variants": [
@@ -1341,6 +1341,9 @@
         },
         {
           "name": "profiler 1"
+        },
+        {
+          "name": "profiler 2"
         }
       ],
       "seed": 1,
@@ -1362,7 +1365,10 @@
         "player_id": "profiler-echo"
       },
       {
-        "player_id": "profiler-echo"
+        "player_id": "profiler-busy-5ms"
+      },
+      {
+        "player_id": "profiler-slow-start-5s"
       }
     ]
   }
