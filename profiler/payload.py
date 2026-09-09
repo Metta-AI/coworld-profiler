@@ -18,20 +18,30 @@ ROW_WIDTH = 8
 def build_payload(seed: int, target_bytes: int) -> list[list[int]]:
     """Rows of small ints whose JSON encoding is close to `target_bytes`.
 
-    A row of eight ints in 0..999 encodes to about 33 bytes including
-    delimiters, so the row count is derived from that and then adjusted by
-    measuring the actual encoding.
+    Each row of eight ints in 0..999 encodes to at most 33 bytes plus a comma,
+    so the row count is estimated from that, the real encoded size is measured
+    once, and the count is corrected proportionally before a final trim. This
+    stays linear in the payload size; re-encoding per row made a 2 MiB payload
+    take 20 s to build.
     """
     rng = random.Random(seed)
-    estimated_rows = max(1, target_bytes // 33)
-    rows = [[rng.randrange(0, 1000) for _ in range(ROW_WIDTH)] for _ in range(estimated_rows)]
-    encoded = len(json.dumps(rows, separators=(",", ":")))
+
+    def rows_of(count: int) -> list[list[int]]:
+        local = random.Random(seed)
+        return [[local.randrange(0, 1000) for _ in range(ROW_WIDTH)] for _ in range(count)]
+
+    estimate = max(1, target_bytes // 30)
+    rows = rows_of(estimate)
+    encoded = encoded_size(rows)
+    corrected = max(1, int(estimate * target_bytes / encoded))
+    rows = rows_of(corrected)
+    encoded = encoded_size(rows)
     while encoded < target_bytes:
         rows.append([rng.randrange(0, 1000) for _ in range(ROW_WIDTH)])
-        encoded = len(json.dumps(rows, separators=(",", ":")))
+        encoded += len(json.dumps(rows[-1], separators=(",", ":"))) + 1
     while encoded > target_bytes and len(rows) > 1:
+        encoded -= len(json.dumps(rows[-1], separators=(",", ":"))) + 1
         rows.pop()
-        encoded = len(json.dumps(rows, separators=(",", ":")))
     return rows
 
 
