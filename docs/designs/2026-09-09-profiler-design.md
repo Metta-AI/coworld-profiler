@@ -172,8 +172,9 @@ platform can view it in replay mode.
 
 ### Player artifact zip
 
-Per slot: `metadata.json`, `lifecycle.jsonl`, `turns.jsonl`, `clocks.jsonl`,
-`resources.jsonl`, `gc.jsonl`, `summary.json`, plus `game_summary.json`, the
+Per slot: `metadata.json`, `lifecycle.jsonl`, `connect_attempts.jsonl`,
+`turns.jsonl`, `clock_anchors.jsonl`, `pings.jsonl`, `resources.jsonl`,
+`loop_lag.jsonl`, `gc.jsonl`, `summary.json`, plus `game_summary.json`, the
 game-side aggregate the game sends in its `final` message. The last file
 matters because the raw `results.json` route is Softmax-team-only, while
 policy artifacts are readable by the policy owner.
@@ -201,7 +202,7 @@ One image, three commands:
 |---|---|
 | echo | decode, noop, encode, send |
 | busy | same, plus a deterministic loop burning `--think-cpu-ms` of thread CPU per turn |
-| slow-start | sleeps `--connect-delay-seconds` before the first connect |
+| slow-start | sleeps `--connect-delay-seconds` before the first connect (bundled as 5 s) |
 
 All keep `ping_timeout=None` (metta `packages/coworld/tests/test_coworld_player_keepalive.py`).
 
@@ -216,7 +217,10 @@ All keep `ping_timeout=None` (metta `packages/coworld/tests/test_coworld_player_
 | `blocking-turns` | per-decision wait |
 | `long-10000-ticks` | GC, keepalive, drift |
 
-Certification fixture: two echo players, 1 KiB, 2 warmup and 20 measured ticks.
+Certification fixture: one of each bundled player (echo, busy 5 ms,
+slow-start 5 s), 1 KiB, 2 warmup and 20 measured ticks. The platform
+requires every bundled player to run in the fixture, which is why the
+bundled slow-start delay is 5 s rather than the 20 s first planned.
 
 ## Repository layout
 
@@ -245,6 +249,7 @@ docs/             this doc, player-protocol.md, measurement-reference.md
 4. Clock probes, connect decomposition, resource and loop-lag samplers.
 5. Payload and fan-out variants, replay viewer, analysis tool.
 6. Certify, push repo, upload, hosted experience requests, read back.
+   Done 2026-09-09; results in `docs/results/2026-09-09-hosted-findings.md`.
 
 ## Decisions made without asking
 
