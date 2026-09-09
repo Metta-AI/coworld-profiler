@@ -1,30 +1,37 @@
 # What a hosted Coworld episode spends its time on
 
-A research report on the coworld-profiler measurements, for James and the Softmax platform team. 2026-09-09. Researched against coworld-profiler `e8f4862` and metta `7e3666966c`.
+A research report on the coworld-profiler measurements and the platform's own lifecycle spans, for James and the Softmax platform team. 2026-09-09. Researched against coworld-profiler `e8f4862` and metta `7e3666966c`.
 
 ## Executive summary
 
-Until this week, the only timing the Observatory recorded for a hosted episode was five coarse phases stamped by the worker from outside the game (`packages/coworld/src/coworld/runner/phase_timings.py:18-31`). Nothing measured what happened between the game pod and the player pods, and the per-turn spans that spec 0080 defines exist only for the in-process arena backend (`docs/specs/0080-coworld-round-tracing-schema.md` §7). We built a Coworld whose only purpose is to measure, ran it as 100 ordinary hosted episodes across five rounds and nine configurations, and read the numbers back from the artifacts the platform already collects.
+A hosted Coworld episode is measured from two sides. From the outside, the worker that runs the episode records five coarse phases and Kubernetes records the game pod's dispatch, and those become spans in Datadog (`packages/coworld/src/coworld/runner/phase_timings.py:18-31`; `docs/specs/0080-coworld-round-tracing-schema.md` §6). From the inside, nothing was measured at all: no timing existed between the game pod and the player pods, and the per-turn spans that spec 0080 defines exist only for the in-process arena backend. This report adds the inside view. We built a Coworld whose only purpose is to measure, ran it as 100 ordinary hosted episodes across five rounds and nine configurations, read the numbers back from the artifacts the platform already collects, and joined them to the Datadog spans of the same 96 jobs.
 
-The headline answer to the original question: **a websocket round trip between the game pod and a player pod costs about 1 ms**. The measure is the transport residual, which is the round trip as the game sees it minus everything the player itself did between receiving and replying; its median was 1.09 ms across 244 slot-episodes of the plain echo player (one slot-episode is one player slot's data from one episode), and 99 percent of turns came in under 2.19 ms. About half of that is the bare wire-and-framing floor a protocol ping shows (0.53 ms). At a 20 ms tick, that is 5 percent of the budget, and only 0.6 percent of actions arrived late, about 0.2 percent once the single disturbed episode is set aside. The transport cost is flat from 1 KiB to 256 KiB observations and then jumps to about 220 ms at 2 MiB, where message reassembly, not the network, dominates; a 20 ms tick is unreachable at that size for a Python game. Encoding and decoding are a separate cost that grows with size even while the wire does not: at 256 KiB they already take about 10 ms of a 20 ms tick, so observation size still matters. The other large finding is about startup, not the loop: each player slot appears 4 to 25 s after the game starts listening, and only about 0.3 s of that is the player's own process, with under 10 ms in DNS, TCP, and the websocket handshake. The remaining 4 to 24 s per slot is pod scheduling, image pull, and the platform's init-container poll, which no container can see. Neither game nor player pods run with a CPU quota. Node clocks agree closely (median offset 0.07 ms), though the probes' own uncertainty of about 0.75 ms is too wide to split the 1 ms round trip into one-way halves, so the report does not try. The one clearly disturbed episode out of 100 was a shared-infrastructure event that hit both slots at once; the profiler cannot tell whether that was the node, the network path, or something else they share.
+The headline answer to the original question: **a websocket round trip between the game pod and a player pod costs about 1 ms**. The measure is the transport residual, the round trip as the game sees it minus everything the player itself did between receipt and reply. Its median was 1.09 ms across 244 slot-episodes of the plain echo player (one slot-episode is one player slot's data from one episode), 99 percent of turns came in under 2.19 ms, and about half of it is the bare wire-and-framing floor a protocol ping shows (0.53 ms). At a 20 ms tick that is 5 percent of the budget. Transport is flat from 1 KiB to 256 KiB observations, then jumps to about 220 ms at 2 MiB where message reassembly dominates, and JSON encode and decode are a separate cost that already takes 10 ms of a 20 ms tick at 256 KiB. The second finding is about startup: each player slot appears 4 to 25 s after the game starts to listen, and only 0.3 s of that is the player's process, with 7 ms in DNS, TCP, and the handshake; the rest is pod scheduling and image pull that no container can see. The join with the spans shows what the outside view gets right and wrong: a baseline episode with 22 s of play costs 59 s of job time, the worker's `first_step_s` over-reports player startup by about 1.2 s of its own polling, its `game_boot_s` misses the game's boot entirely because the worker container starts after the game is already listening, and every job ends with an unnamed tail after the artifacts are written, 5.6 s at the median and up to 28 s.
 
 ## Contents
 
 1. [Why this exists](#1-why-this-exists)
 2. [How the profiler measures](#2-how-the-profiler-measures)
+   1. [One turn](#one-turn)
+   2. [Clocks](#clocks)
+   3. [Connect](#connect)
+   4. [Two game modes](#two-game-modes)
+   5. [The whole episode](#the-whole-episode)
 3. [The experiment](#3-the-experiment)
-4. [Results](#4-results)
-   1. [The cost of one turn](#41-the-cost-of-one-turn)
-   2. [Observation size](#42-observation-size)
-   3. [Fan-out to more players](#43-fan-out-to-more-players)
-   4. [Tick rate and blocking turns](#44-tick-rate-and-blocking-turns)
-   5. [Startup: where the seconds go](#45-startup-where-the-seconds-go)
-   6. [Finalize](#46-finalize)
-   7. [Context: CPU, garbage collection, clocks, stability](#47-context-cpu-garbage-collection-clocks-stability)
-5. [What this explains of the platform's spans](#5-what-this-explains-of-the-platforms-spans)
-6. [What it cannot explain, and what would](#6-what-it-cannot-explain-and-what-would)
-7. [Platform behaviour observed along the way](#7-platform-behaviour-observed-along-the-way)
-8. [Recommendations](#8-recommendations)
+4. [The outside view: what the platform's spans say](#4-the-outside-view-what-the-platforms-spans-say)
+5. [The inside view](#5-the-inside-view)
+   1. [The cost of one turn](#51-the-cost-of-one-turn)
+   2. [Observation size](#52-observation-size)
+   3. [Fan-out to more players](#53-fan-out-to-more-players)
+   4. [Tick rate and blocking turns](#54-tick-rate-and-blocking-turns)
+   5. [Startup: where the seconds go](#55-startup-where-the-seconds-go)
+   6. [Finalize](#56-finalize)
+   7. [Context: CPU, garbage collection, clocks, stability](#57-context-cpu-garbage-collection-clocks-stability)
+6. [Reconciling the two views](#6-reconciling-the-two-views)
+7. [What this explains of the platform's spans](#7-what-this-explains-of-the-platforms-spans)
+8. [What it cannot explain, and what would](#8-what-it-cannot-explain-and-what-would)
+9. [Platform behaviour observed along the way](#9-platform-behaviour-observed-along-the-way)
+10. [Recommendations](#10-recommendations)
 - [Appendix A: reproducing the numbers](#appendix-a-reproducing-the-numbers)
 - [Appendix B: field glossary](#appendix-b-field-glossary)
 - [Appendix C: episode requests](#appendix-c-episode-requests)
@@ -37,7 +44,7 @@ The headline answer to the original question: **a websocket round trip between t
 - The cluster is deliberately agentless: containers emit no telemetry, so the only way to measure inside is to write measurements into artifacts.
 - The game-facing contract is frozen, so the measuring game and players had to work within it unchanged.
 
-The worker that runs a hosted episode stamps five durations from the outside: `game_boot_s` (until the game answers `/healthz`), `player_launch_s` (issuing the player pod creates), `first_step_s` (until the game's viewer socket delivers a first message and every player pod has started), `gameplay_s` (until results and replay exist), and `artifact_upload_s` (`packages/coworld/src/coworld/runner/phase_timings.py:18-31`; stamped at `packages/coworld/src/coworld/runner/kubernetes_runner.py:802-872`). These become spans by adding the durations up in order, anchored only at the running-stage start, and `first_step_s` gets no span at all (`app_backend/src/metta/app_backend/job_lifecycle_trace.py:284-345`). The worker polls health and artifacts once a second (`kubernetes_runner.py:95-96`), so every phase boundary carries up to a second of polling slop.
+The worker that runs a hosted episode stamps five durations from the outside: `game_boot_s` (until the game answers `/healthz`), `player_launch_s` (issuing the player pod creates), `first_step_s` (until the game's viewer socket delivers a first message and every player pod has started), `gameplay_s` (until results and replay exist), and `artifact_upload_s` (`packages/coworld/src/coworld/runner/phase_timings.py:18-31`; stamped at `packages/coworld/src/coworld/runner/kubernetes_runner.py:802-872`). These become spans by adding the durations up in order, anchored only at the running-stage start, and `first_step_s` gets no span at all (`app_backend/src/metta/app_backend/job_lifecycle_trace.py:284-345`). The worker polls health and artifacts once a second (`kubernetes_runner.py:95-96`), so every phase boundary carries up to a second of polling slop. Around those phases, the job's lifecycle trace also carries the `pending`, `dispatched`, and `running` stage spans and, for the game pod only, the `pod.create`, `node.allocate`, `image.pull`, and `container.start` spans read from the Kubernetes API (`job_lifecycle_trace.py:420-432, 595-627`).
 
 Spec 0080 froze a richer vocabulary for the inside of an episode: `player.connect`, `player.turn`, `game.step`, and the metrics `player.turn.duration` and `game.step.duration`. The arena backend emits them live because it runs the game and players in one process (`app_backend/src/metta/app_backend/arena_runner/pump.py:149-158`). For the Kubernetes path there is no source, and the plan to have games write a timing file was withdrawn on 2026-08-17 because it extended the public game contract (`docs/specs/0080-coworld-round-tracing-schema.md` §3, §7). The dashboards say so explicitly (`devops/datadog/dashboards.py:6356-6362`), and the one per-step panel that exists divides the running-stage duration by episode length, a derived average rather than a measurement (`devops/datadog/dashboards.py:1691-1707`).
 
@@ -54,7 +61,7 @@ flowchart TD
     E --> E1[pod scheduling,<br/>image pull,<br/>init container polls,<br/>worker S3 uploads]
 ```
 
-Figure 1 — How each interval was classified before building anything. "Measured" needs two timestamps in one process. "Bounded" has visible edges but hidden internals. "Unobservable" is outside every process we control. The unobservable list is where most of the startup time turns out to be.
+Figure 1 — How each interval was classified before building anything. "Measured" needs two timestamps in one process. "Bounded" has visible edges but hidden internals. "Unobservable" is outside every process we control; for those, the platform's own spans are the only source, and section 4 uses them.
 
 ## 2. How the profiler measures
 
@@ -107,7 +114,7 @@ All durations use the monotonic clock of the process that took them, and a game 
 - DNS, TCP connect, and the websocket upgrade are timed as three separate steps.
 - Players keep `ping_timeout=None` as the platform requires; both ends allow 4 MiB messages with compression off.
 
-The player resolves the game's Service name with `getaddrinfo`, connects a plain TCP socket, and hands that socket to the websocket library, so DNS, TCP, and the HTTP upgrade are timed separately (`profiler/player/connection.py`, `connect_instrumented`). Every player keeps `ping_timeout=None`, which the platform requires because some deployed games do not answer pings (`packages/coworld/tests/test_coworld_player_keepalive.py:1-9`). Both ends allow 4 MiB messages and disable compression.
+The player resolves the game's Service name (the Kubernetes Service is the stable in-cluster address that fronts the game pod) with `getaddrinfo`, connects a plain TCP socket, and hands that socket to the websocket library, so DNS, TCP, and the HTTP upgrade are timed separately (`profiler/player/connection.py`, `connect_instrumented`). Every player keeps `ping_timeout=None`, which the platform requires because some deployed games do not answer pings (`packages/coworld/tests/test_coworld_player_keepalive.py:1-9`). Both ends allow 4 MiB messages and disable compression.
 
 ### Two game modes
 
@@ -170,17 +177,18 @@ sequenceDiagram
     Note over W: artifact_upload_s ends
 ```
 
-Figure 4 — Where the worker's five phases fall against what the game and players see. The game stamps its own bootstrap from the first line of Python (`profiler/__init__.py`; `profiler/game/server.py`, `GameRuntime`) and records every `/healthz` hit and the first `/global` connection, which are the worker's first observations of it. Each player's `hello` carries its startup stamps and connect attempts.
+Figure 4 — Where the worker's five phases fall against what the game and players see. The game stamps its own bootstrap from the first line of Python (`profiler/__init__.py`; `profiler/game/server.py`, `GameRuntime`) and records every `/healthz` hit and the first `/global` connection, which are the worker's first observations of it. Each player's `hello` carries its startup stamps and connect attempts. The init container is a small platform-owned container that runs in the player pod before the player itself and polls the game's health until it answers.
 
-Besides the turn stamps, both processes sample context once a second: cgroup CPU usage, throttling, quota, and memory from the v2 cgroup files, process RSS, a 10 ms event-loop lag probe, and Python garbage-collection pauses via `gc.callbacks` (`profiler/resources.py`). At the end the game writes a gzip JSONL replay containing every record, then `results.json` with aggregates only, and each player writes a zip with its raw traces plus a copy of the game's summary, so a policy owner can read the whole picture even though the raw `results.json` route is restricted to team accounts (`packages/coworld/src/coworld/docs/artifacts/RESULTS.md`; `profiler/player/player.py`, `_publish`).
+Besides the turn stamps, both processes sample context once a second: CPU usage, throttling, quota, and memory from the container's cgroup files (the Linux accounting the kernel keeps per container), process RSS, a 10 ms event-loop lag probe, and Python garbage-collection pauses via `gc.callbacks` (`profiler/resources.py`). At the end the game writes a gzip JSONL replay containing every record, then `results.json` with aggregates only, and each player writes a zip with its raw traces plus a copy of the game's summary, so a policy owner can read the whole picture even though the raw `results.json` route is restricted to team accounts (`packages/coworld/src/coworld/docs/artifacts/RESULTS.md`; `profiler/player/player.py`, `_publish`).
 
 ## 3. The experiment
 
 - Nine configurations, three bundled players, five rounds, 100 hosted episodes, 406 connected player slots, 76 clean episodes used for the loop results.
-- Round 1 had a defect in the busy player's command line; its echo slots are still valid and are used only for startup numbers.
-- Two profiler-side inefficiencies were found in the data and fixed after the fact; neither touches the measured turn path.
+- Every episode's lifecycle trace was fetched from Datadog and joined to its results by job id; 96 of the 100 episodes join (the four unjoined are smoke episodes whose rows were not downloaded).
+- Round 1 ran with the busy player's command line malformed, so its echo slots feed the startup tables only.
+- The hosted image has two profiler-side inefficiencies that are visible in the data and outside the measured turn path.
 
-The coworld is `profiler` 0.1.0, uploaded as `cow_f4c8de04-7d32-4bc8-a316-8cd8cda6a729` from image `coworld-profiler:coworld-8e682f09bc97` at source commit `d400b90`. Hosted smoke certification passed on upload with five smoke episodes of the certification fixture. Every experiment episode came from an experience request (`coworld xp-request`) naming one variant and a roster of two policies: `profiler-busy-5ms` in slot 0 and `profiler-echo` in the rest (`tools/request_experiments.py`).
+The coworld is `profiler` 0.1.0, uploaded as `cow_f4c8de04-7d32-4bc8-a316-8cd8cda6a729` from image `coworld-profiler:coworld-8e682f09bc97` at source commit `d400b90`. Hosted smoke certification passed on upload with five smoke episodes of the certification fixture. Every experiment episode came from an experience request (`coworld xp-request`) naming one variant and a roster of two policies: `profiler-busy-5ms` in slot 0 and `profiler-echo` in the rest (`tools/request_experiments.py`). For each episode's job id the `job.lifecycle` trace was fetched from the Datadog spans API through the token broker's read-only scope (`tools/fetch_spans.py`) and joined to the profiler's results (`tools/reconcile_spans.py`).
 
 | Variant | Slots | Tick | Observation | Measured ticks | Question |
 |---|---|---|---|---|---|
@@ -198,19 +206,53 @@ The bundled players share one image and one code path. `echo` decodes, replies n
 
 Rounds and caveats:
 
-- Round 1 (19 experiment episodes plus 5 smoke episodes) ran with the busy policy's command line stored as one token, `--think-cpu-ms 5`, because my upload loop did not split the argument. The player exited with an argparse error, the game waited its full 180 s connect timeout, then ran with slot 0 empty. The echo slots measured normally, so round 1 contributes to the startup tables but not to the loop tables. Section 7 records what the platform did with those episodes.
+- Round 1 (19 experiment episodes plus 5 smoke episodes) ran with the busy policy's command line stored as one token, `--think-cpu-ms 5`, because the upload loop did not split the argument. The player exited with an argparse error, the game waited its full 180 s connect timeout, then ran with slot 0 empty. The echo slots measured normally, so round 1 contributes to the startup tables but not to the loop tables. Section 9 records what the platform did with those episodes.
 - Rounds 2 to 5 (76 episodes) are clean: 12 baseline, 8 of every other variant.
-- The 2 MiB payload took about 21 s to generate in the game because the generator re-encoded on every added row. This inflates `game_boot_s` for the eight sweep episodes only and is outside every turn measurement. Fixed in `profiler/payload.py` after round 5 was requested (2 MiB now builds in 0.25 s).
-- The player-side event-loop-lag summary was null in every hosted episode because the samples were moved into the record store before being summarized. The raw samples are in the zips; the fix is in `profiler/player/player.py` but the hosted image predates it.
+- In the hosted image the 2 MiB payload takes about 21 s to generate, because the generator re-encodes on every added row. This inflates `game_boot_s` for the eight sweep episodes only and is outside every turn measurement. The repository's generator builds it in 0.25 s (`profiler/payload.py`).
+- In the hosted image the player-side event-loop-lag summary is null, because the samples are moved into the record store before being summarized. The raw samples are in the zips (`profiler/player/player.py`).
 
-## 4. Results
+## 4. The outside view: what the platform's spans say
+
+- A baseline episode with 22 s of measured play is a 59 s job: 1.7 s pending, 13.7 s dispatched, 7.2 s of player startup, 23.3 s of gameplay as the worker sees it, 0.5 s of finalize, and 7.8 s of tail after the artifacts are written.
+- The dispatched stage, before the worker even starts, is the largest fixed cost, and only about 4.7 s of it is accounted for by the game pod's own create and container-start spans.
+- `game_boot_s` reads 0.1 s in every non-sweep episode; it is not measuring the game's boot.
+- `image.pull` appears on 21 of 96 jobs with a duration of 0 and `cache_hit=false` on all of them; `node.allocate` is 0 on all 96.
+
+The lifecycle trace of every job carries the three stage spans, the four runtime phase spans derived from the worker's timings, and the game pod's dispatch spans. `first_step_s` has no span, but the phase spans are laid end to end, so it is the gap between `player.launch` ending and `episode.loop` starting. The tail is the gap between `episode.finalize` ending and the `running` stage ending.
+
+| Span or derived interval | Median | p90 | Min | Max | n |
+|---|---|---|---|---|---|
+| stage pending | 1,216 | 2,956 | 106 | 3,973 | 96 |
+| stage dispatched (pod create to worker start) | 14,284 | 42,108 | 7,041 | 44,985 | 96 |
+| `pod.create` (game pod) | 3,717 | 10,467 | 0 | 13,467 | 96 |
+| `node.allocate` (game pod) | 0 | 0 | 0 | 0 | 96 |
+| `image.pull` (game pod, when emitted) | 0 | 0 | 0 | 0 | 21 |
+| `container.start` (game pod) | 1,000 | 2,000 | 0 | 4,000 | 96 |
+| stage running | 55,143 | 224,404 | 19,236 | 394,540 | 96 |
+| `game.bootstrap` (`game_boot_s`) | 104 | 17,504 | 87 | 21,602 | 96 |
+| `player.launch` (`player_launch_s`) | 151 | 1,015 | 131 | 1,076 | 96 |
+| `first_step_s`, derived | 7,175 | 26,364 | 4,456 | 34,083 | 96 |
+| `episode.loop` (`gameplay_s`) | 25,365 | 204,896 | 0 | 378,173 | 96 |
+| `episode.finalize` (`artifact_upload_s`) | 557 | 1,576 | 410 | 1,978 | 96 |
+| running stage after `episode.finalize` ends | 5,553 | 11,626 | -830 | 28,266 | 96 |
+| whole job | 82,612 | 246,102 | 31,623 | 404,689 | 96 |
+
+All 96 joined episodes, milliseconds; p90 is the 90th percentile, the value that nine in ten episodes stay under. The p90 of `game.bootstrap` is the eight sweep episodes' 21 s payload build (section 3). The p90 of `first_step_s` comes from eight episodes in which the worker placed the boundary between player startup and gameplay about 10 s late; section 6 explains them. The negative minimum of the tail is one job whose `running` stage ended before its finalize span did, which can happen because the phase spans are placed by adding durations end to end from the stage start rather than from their own timestamps.
+
+![Figure 5](figures/figure-5.svg)
+
+Figure 5 — A median baseline episode laid out in job time from the worker's spans, whole job 59 s. The game's own stamps are placed on the same axis below the bar, aligned through the worker's first `/healthz` hit, which both sides see. Gameplay is 23 of 59 seconds. The game was already listening before the worker's `game_boot_s` phase began.
+
+Three things in this table are not what the phase names suggest. First, `game_boot_s` is 87 to 126 ms in every episode that is not a sweep, while the game's own stamps say it takes 0.55 s from process start to listening. The worker container in the same pod starts after the game container, and by the time its first `/healthz` poll goes out the game has been listening for about 0.4 s; the 104 ms is the worker's own Kubernetes client initialization plus one successful request. The game's real boot is inside the `dispatched` stage. Second, the `dispatched` stage is 13.7 s at the baseline median and up to 45 s, and the game pod's `pod.create` (3.7 s) and `container.start` (1 s, at one-second resolution) explain about 4.7 s of it; `image.pull` is emitted for only 21 jobs, always with a zero duration and `cache_hit=false`, so the pull span is not carrying what its name says. The remaining 9 to 10 s between the pod being created and the worker's first stamp is unaccounted for by any span. Third, the `running` stage continues for 5.6 s at the median and up to 28 s after `episode.finalize` ends. That is the worker's log collection, child pod deletion, and the platform's observation of the job's termination, none of which has a span.
+
+## 5. The inside view
 
 - All numbers are milliseconds unless stated.
-- "p50" is the median and "p99" the 99th percentile, both nearest-rank over the measured phase only.
+- "p50" is the median and "p99" the 99th percentile, the value that 99 in 100 turns stay under; both are read off the sorted samples of the measured phase only.
 - A slot-episode is one player slot's data from one episode; per-variant rows are medians across the episodes of that variant.
 - The tables were produced by `tools/aggregate_rounds.py` and are reproduced in full in the working directory's `data.md`.
 
-### 4.1 The cost of one turn
+### 5.1 The cost of one turn
 
 - Transport residual for a 1 KiB observation and its reply: 1.09 ms median, 2.19 ms p99, across 244 echo slot-episodes.
 - The residual is close with a 5 ms busy player (0.75 ms median against 1.09 for echo), so the decomposition separates the player's own work from transport; the difference has a mundane cause explained below.
@@ -224,7 +266,7 @@ Rounds and caveats:
 
 Pooled over the clean fixed-tick and blocking episodes at 1 KiB. Zero negative residuals and zero missing timing reports in both populations.
 
-The busy player's processing is 5.12 ms for 5.02 ms of CPU: the think loop runs uninterrupted, which is consistent with the absence of any CPU quota on player pods (section 4.7). Its residual is slightly lower than echo's, which is expected: the game's own event loop is idle while the busy player thinks, so the reply is picked up with less scheduling delay.
+The busy player's processing is 5.12 ms for 5.02 ms of CPU: the think loop runs uninterrupted, which is consistent with the absence of any CPU quota on player pods (section 5.7). Its residual is slightly lower than echo's, which is expected: the game's own event loop is idle while the busy player thinks, so the reply is picked up with less scheduling delay.
 
 ```mermaid
 sequenceDiagram
@@ -240,32 +282,24 @@ sequenceDiagram
     Note over G,P: round trip 1.17 ms, of which 0.09 ms is processing.<br/>Residual, measured per turn: 1.09 ms.<br/>Bare ping/pong: 0.53 ms.
 ```
 
-Figure 5 — Figure 2 again with the measured medians for an echo slot at 1 KiB. The player's own work is 0.09 ms of the 1.17 ms round trip and the transport residual is 1.09 ms; each is the median of its own per-turn distribution, so they do not subtract exactly. The 0.53 ms ping shows the floor. The encode time is borrowed from the payload sweep's 1 KiB cell, the only variant that records it per cell.
+Figure 6 — Figure 2 again with the measured medians for an echo slot at 1 KiB. The player's own work is 0.09 ms of the 1.17 ms round trip and the transport residual is 1.09 ms; each is the median of its own per-turn distribution, so they do not subtract exactly. The 0.53 ms ping shows the floor.
 
-The busy late rate needs a caveat. Of its 4,004 late actions, 3,217 come from one 10,000-tick episode (`ereq_2c9d462c`) in which both slots saw residual p99 of 75 to 79 ms and maximum round trips near 200 ms for a stretch; the echo slot in that episode was late 1,113 times too. That is a disturbance in something both pods share, consistent with a node- or network-level event, and not a busy-player effect; the profiler cannot confirm node placement (section 6). Across the 12 clean baseline episodes the busy slot was late 0 to 4 times out of 1,000, and at the 41.7 ms and 50 ms ticks it was never late in 16,000 observations.
+The busy late rate needs a caveat. Of its 4,004 late actions, 3,217 come from one 10,000-tick episode (`ereq_2c9d462c`) in which both slots saw residual p99 of 75 to 79 ms and maximum round trips near 200 ms for a stretch; the echo slot in that episode was late 1,113 times too. That is a disturbance in something both pods share, consistent with a node- or network-level event, and not a busy-player effect; the profiler cannot confirm node placement (section 8). Across the 12 clean baseline episodes the busy slot was late 0 to 4 times out of 1,000, and at the 41.7 ms and 50 ms ticks it was never late in 16,000 observations.
 
 The residual is also stable across slot-episodes: across 244 echo slots its median ranged from 0.42 to 1.96 ms, with the middle 80 percent between 0.60 and 1.64 ms. The round trip's p99 across those same slots has a longer tail (median 2.29 ms, 90th percentile of slot p99s 10.1 ms, worst 75.3 ms), and every slot p99 above 15 ms belongs to either the disturbed long episode or a 16-slot episode.
 
 The game's `send` call returned in 0.02 ms at the median and never blocked long even at 16 slots, so the game process is never waiting on a socket. Whatever the residual contains happens after the bytes leave the game's event loop.
 
-### 4.2 Observation size
+### 5.2 Observation size
 
 - Round trip is flat to within 1 ms from 1 KiB to 16 KiB, about 10 ms at 256 KiB, and about 260 ms at 2 MiB.
 - Below 256 KiB the growth is JSON encoding in the game and decoding in the player, not the residual.
 - At 2 MiB the residual itself jumps to 220 ms: the player's websocket library must reassemble the whole message before delivering it.
 - A Python game cannot hold a 20 ms tick at 2 MiB; the loop fell 10 s behind and 64 percent of actions were late.
 
-```mermaid
-%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#b3542a, #1f1b16"}}}}%%
-xychart-beta
-    title "Round trip and transport residual by observation size, 2 slots, 20 ms tick (ms)"
-    x-axis ["1 KiB", "16 KiB", "256 KiB"]
-    y-axis "milliseconds" 0 --> 12
-    bar [1.24, 2.29, 9.98]
-    line [0.77, 0.92, 0.98]
-```
+![Figure 7](figures/figure-7.svg)
 
-Figure 6 — Round trip (bars) and transport residual (line) for the three sub-megabyte sizes, first pass of the sweep, medians of 8 episodes. The residual stays under 1 ms while the round trip grows tenfold: the gap is JSON encoding in the game and decoding in the player. The 2 MiB cell is off this chart at a 263 ms round trip and a 222 ms residual; see the table.
+Figure 7 — Round trip and transport residual by observation size, first pass of the sweep, medians of 8 episodes, on a logarithmic axis because the values span three orders of magnitude; every bar carries its value. The residual stays under 1 ms up to 256 KiB while the round trip grows tenfold, so the gap is JSON work on both ends. At 2 MiB the residual becomes most of the round trip.
 
 | Cell | Bytes | Round trip p50 | Round trip p99 | Residual p50 | Residual p99 | Game encode p50 | Samples |
 |---|---|---|---|---|---|---|---|
@@ -284,11 +318,15 @@ The second pass runs the sizes in reverse order and shows the aftermath of the 2
 
 The reading for real games: CTF's sprite frames are multi-megabyte (`docs/specs/0076-arena-single-pod-experiment.md:117, 573`). At that size the per-turn cost is dominated by serialization and message reassembly. The 263 ms round trip measured here is more than six Crewrift ticks of 41.7 ms, though that is an extrapolation from a Python game and Python players, not a measurement of CTF itself. Crewrift and CTF are Nim, not Python, so their encode cost is lower, but the reassembly cost on the player side is a property of the payload size and the player's websocket library, not of the game's language.
 
-### 4.3 Fan-out to more players
+### 5.3 Fan-out to more players
 
 - The residual rises gently with slot count: 0.69 ms at 2 slots, 0.72 at 4, 0.91 at 8, 1.38 at 16.
 - Within a 16-slot episode the slowest echo slot's median is about 1.7 times the fastest's, with no fixed ordering.
 - The cost of fan-out lands in the game's event loop and garbage collector, not in the sockets.
+
+![Figure 8](figures/figure-8.svg)
+
+Figure 8 — Transport residual by slot count: the dot is the per-variant median and the bar reaches to the p99. The median moves by 0.7 ms from 2 to 16 slots; the p99 is where the extra slots show, and it is still under 5 ms.
 
 | Slots | Episodes | Residual p50 | Residual p99 | Game tick lag p99 | Game loop lag p99 | GC max pause | Late |
 |---|---|---|---|---|---|---|---|
@@ -310,7 +348,7 @@ Spread of per-slot round-trip medians within an episode, median across episodes.
 
 The table carries two lag columns. Tick lag is how late a scheduled tick actually started; loop lag is how late a 10 ms periodic sleep woke up, which measures how busy the game's event loop is between ticks. At 16 slots the loop lag p99 rises from 1 to 4.7 ms and the worst garbage-collection pause from 16 to 55 ms, while tick lag barely moves and `send` calls still return in well under 0.1 ms. The game is doing 16 encodes and 16 decodes per tick in one Python event loop, and that, plus the collector working through the profiler's own record buffers, is what the extra slots cost. The transport itself grows by about 0.7 ms from 2 to 16 slots.
 
-### 4.4 Tick rate and blocking turns
+### 5.4 Tick rate and blocking turns
 
 - The 41.7 ms (24 fps) and 50 ms ticks behave like 20 ms at 1 KiB, with zero late actions in 16,000 busy observations.
 - Blocking turns cost 0.59 ms per echo decision and 5.67 ms per busy decision; 2,000 decisions took 7.4 s of loop time.
@@ -323,7 +361,7 @@ The table carries two lag columns. Tick lag is how late a scheduled tick actuall
 
 For the blocking shape, the per-decision turn time as the game sees it was 0.59 ms for echo and 5.67 ms for busy at the median, with a pooled p99 of 6.18 ms. Transport adds about half a millisecond to every decision, which is invisible next to the seconds an LLM-backed player spends thinking, and the 2 s deadline was never hit.
 
-### 4.5 Startup: where the seconds go
+### 5.5 Startup: where the seconds go
 
 - The game is ready to serve about 0.55 s after its process starts, and the worker notices within its 1 s poll.
 - Each player slot appears 4 to 25 s after the game starts listening.
@@ -335,14 +373,14 @@ flowchart TB
     g1["process start to first Python line<br/>72 ms"] --> g2["imports<br/>446 ms"] --> g3["server ready, listening<br/>23 ms later"] --> g4["worker sees /healthz<br/>434 ms after listen"] --> g5["worker opens /global<br/>846 ms after listen"]
 ```
 
-Figure 7 — The game pod's median startup, top to bottom in time. Every step is measured from inside the game. The game is listening about 0.55 s after its process starts; the two worker steps show when the worker first noticed it.
+Figure 9 — The game pod's median startup, top to bottom in time. Every step is measured from inside the game. The game is listening about 0.55 s after its process starts; the two worker steps show when the worker first noticed it.
 
 ```mermaid
 flowchart TB
     p0["schedule, pull image, init container polls<br/>about 5 s, up to 24 s<br/>UNOBSERVABLE from inside"] --> p1["process start to first Python line<br/>72 ms"] --> p2["imports<br/>243 ms"] --> p3["DNS 4.5 ms, TCP 0.6 ms, upgrade 2.0 ms"] --> p4["hello exchanged, slot ready<br/>6.2 s after the game listens"]
 ```
 
-Figure 8 — One player slot's median startup, counted from the moment the game starts listening. The first box is the part no container can measure, and it is most of the timeline; the three measured player steps together are about 0.3 s.
+Figure 10 — One player slot's median startup, counted from the moment the game starts listening. The first box is the part no container can measure, and it is most of the timeline; the three measured player steps together are about 0.3 s.
 
 | Interval | Median | p90 | Min | Max | n |
 |---|---|---|---|---|---|
@@ -363,15 +401,15 @@ Figure 8 — One player slot's median startup, counted from the moment the game 
 
 All 100 hosted episodes; the game-listening intervals are on the game's clock. The two rows with n = 394 come from replays, and the replays of four smoke episodes (12 slots) were not downloaded; the rows with n = 406 come from results.json, which every episode has.
 
-The `/healthz` number is the worker's first look at the game and it lands at 434 ms median, which is what a 1 s poll against a server that became ready at a random point in the poll interval produces. The `/global` viewer opens about 0.4 s after that, following the worker's contract checks and pod creates. From there to the first player hello is about 4.5 s at the median (5.3 s from listening to the first slot ready, minus the 0.85 s to the viewer). Figure 8 quotes 6.2 s because it is the median over all 406 slots rather than the first slot of each episode; later slots in an episode are ready later, and the 16-slot episodes stretch the tail. The DNS lookup, TCP connect, and websocket upgrade together take 7 ms, and they are a warm path, because the platform's init container has already been polling the same Service for the game's health before the player process was allowed to start (`packages/coworld/src/coworld/runner/kubernetes_runner.py:135-150, 1131-1150`).
+The `/healthz` number is the worker's first look at the game and it lands at 434 ms median, which is what a 1 s poll against a server that became ready at a random point in the poll interval produces. The `/global` viewer opens about 0.4 s after that, following the worker's contract checks and pod creates. From there to the first player hello is about 4.5 s at the median (5.3 s from listening to the first slot ready, minus the 0.85 s to the viewer). Figure 10 quotes 6.2 s because it is the median over all 406 slots rather than the first slot of each episode; later slots in an episode are ready later, and the 16-slot episodes stretch the tail. The DNS lookup, TCP connect, and websocket upgrade together take 7 ms, and they are a warm path, because the platform's init container has already been polling the same Service for the game's health before the player process was allowed to start (`packages/coworld/src/coworld/runner/kubernetes_runner.py:135-150, 1131-1150`).
 
 So the span-less `first_step_s` phase decomposes as: under 1 s of worker checks and viewer connect, 0.3 s of player process startup per slot, 7 ms of network setup per slot, and 4 to 24 s per slot of Kubernetes work that only the Kubernetes API can account for. The 16-slot episodes had the widest spread, with last-slot-ready up to 25 s.
 
-### 4.6 Finalize
+### 5.6 Finalize
 
 - Building the replay takes 190 ms at the median and 1.3 s for the 10,000-tick episodes; writing it to the shared workdir is under 1 ms.
 - Each player's zip upload through the worker's artifact server takes 125 ms at the median, 1.4 s at worst.
-- The worker's own S3 uploads afterwards are outside every process here and remain unmeasured.
+- The worker's own S3 uploads afterwards are outside every process here; the spans put `artifact_upload_s` at 0.56 s median.
 
 | Interval | Median | p90 | Max | n |
 |---|---|---|---|---|
@@ -381,7 +419,7 @@ So the span-less `first_step_s` phase decomposes as: under 1 s of worker checks 
 
 Hosted games receive `file://` targets for results and replay, and the worker does the S3 upload after the game exits (`app_backend/src/metta/app_backend/job_runner/dispatcher.py:940-948`), so the `artifact_upload_s` phase is the worker's work and the game's own write is negligible. The player zip goes over HTTP to an upload server the worker runs in the game pod, which is why it costs 100 ms rather than 1 ms.
 
-### 4.7 Context: CPU, garbage collection, clocks, stability
+### 5.7 Context: CPU, garbage collection, clocks, stability
 
 - No CPU quota on game or player pods; zero throttling in 100 episodes.
 - Node clocks agree closely (median offset 0.07 ms), but the probes' own uncertainty of about 0.75 ms is too wide to split the round trip into one-way halves.
@@ -394,57 +432,96 @@ Garbage collection in the game is worth separating from the platform. The worst 
 
 The clock probes put the player pod's wall clock at 0.07 ms ahead of the game's at the median, with a range of -0.16 to +0.44 ms across 406 slots and a median bound width of 0.75 ms. That is not tight enough to split the 1 ms round trip into one-way halves, because the uncertainty is nearly as large as the thing being measured, so the report does not lean on one-way estimates.
 
-Stability across rounds: the baseline residual per episode was 0.49, 1.01, 0.72 in round 2 and 0.56, 0.70, 0.81, 0.67, 0.59, 0.76, 0.85, 0.64, 0.67 in rounds 3 to 5. The 10,000-tick episodes (202 s of loop each) showed no drift in round trip or residual over their length, and their 0.49 percent median late rate is driven by the one disturbed episode described in 4.1; the others were at 0.02 to 0.1 percent.
+Stability across rounds: the baseline residual per episode was 0.49, 1.01, 0.72 in round 2 and 0.56, 0.70, 0.81, 0.67, 0.59, 0.76, 0.85, 0.64, 0.67 in rounds 3 to 5. The 10,000-tick episodes (202 s of loop each) showed no drift in round trip or residual over their length, and their 0.49 percent median late rate is driven by the one disturbed episode described in 5.1; the others were at 0.02 to 0.1 percent.
 
-## 5. What this explains of the platform's spans
+## 6. Reconciling the two views
 
-- `game.bootstrap`: now decomposed into process start, imports, config, server start, and poll slop, all measured.
-- `first_step_s`: the player-side and network parts are measured and small; the large remainder is Kubernetes and is bounded, not measured.
+- In 68 of 76 clean episodes the worker's `first_step_s` runs about 1.1 s longer than the game's own measure of the same interval: that is the worker's polling delay in noticing that the pods started. In the 8 slowest startups the worker placed that boundary a further 10 s late and booked gameplay as player startup.
+- `game_boot_s` reads 0.1 s while the game itself takes 0.55 s to boot, because the worker container starts after the game is already listening; the game's boot is hidden inside the `dispatched` stage.
+- In those same 68 episodes `gameplay_s` exceeds the game's measured loop by 1.4 s at the median: the profiler's own probe, flush, and write phases plus up to a second of artifact polling.
+- For a 22 s baseline loop the whole job is 59 s at the median; the play is 37 percent of it.
+
+The join is by job id: each results file names its episode request, each episode request row names its job, and each job has exactly one lifecycle trace. Both clocks meet at one event both sides see, the worker's first successful `/healthz` request, which is the end of `game_boot_s` on the outside and the first health hit stamped inside the game.
+
+![Figure 11](figures/figure-11.svg)
+
+Figure 11 — Player startup as the game sees it, one dot per clean episode, grouped by slot count: the time from the game's first `/global` viewer to the last slot's hello. Three groups appear at every slot count: 50 episodes between 3.9 and 6.6 s, 18 between 8.6 and 14.6 s, and 8 between 16 and 21 s, with gaps between them. The worker's `first_step_s` for the same episodes sits about 1.1 s to the right of each dot in the first two groups and about 10 s to the right in the third.
+
+| Interval | Outside, from spans | Inside, from the game | Difference and cause |
+|---|---|---|---|
+| player startup: `first_step_s` versus first viewer to last slot ready | 7,173 median (n=76) | 5,904 median | in 68 episodes the inside number is 1,138 ms shorter at the median, between 641 and 1,579 ms across the 10th to 90th percentiles: the worker polls pod status once a second and then reads its viewer socket, so it notices the last pod start about a second late; the game sees the hello directly. In 8 episodes the worker's number is 10.3 to 11.7 s longer, because its boundary landed late |
+| game boot: `game_boot_s` versus process start to listening | 104 | 572, plus 401 from listening to the worker's first `/healthz` hit | the worker starts its poll after the game is up; `game_boot_s` measures the worker's client setup and one request, not the game |
+| gameplay: `gameplay_s` versus the measured loop | 25,365 | 22,010 | in the 68 episodes with a correctly placed boundary the outside number is 1,373 ms longer per episode at the median (672 to 2,891 across the 10th to 90th percentiles): the profiler's clock-probe windows, drain, flush, and replay build (about 0.5 to 1 s) plus the worker's 1 s artifact poll. In the 8 late-boundary episodes `gameplay_s` is 6.7 to 9.8 s shorter than the loop, and in two of them (`ereq_bc36967e`, `ereq_f44fda14`) it is 0 |
+| finalize: `artifact_upload_s` versus replay build | 564 | 178 | the worker's S3 uploads and debug archive; the game's write is under 1 ms |
+| `player_launch_s` | 151 median, 1,076 max | the game sees the contract checks in under 10 ms | the rest is Kubernetes API calls, one per player pod |
+
+Milliseconds, clean episodes unless stated. The per-episode differences are medians of differences, not differences of medians; the two medians in a row therefore do not subtract to the difference column.
+
+Set the eight slowest episodes aside and the two views agree on player startup at every slot count: the worker says 7.1, 7.3, 6.6, and 7.3 s for 2, 4, 8, and 16 slots, the game says 5.8, 5.7, 5.5, and 6.2 s. The slot count does not move the median. What varies is which group an episode lands in. On the game side, 50 episodes took 3.9 to 6.6 s, 18 took 8.6 to 14.6 s, and 8 took 16 to 21 s, and all three groups appear at 2, 4, 8, and 16 slots. The steps between the groups are fixed costs of roughly 6 to 8 s that some episodes pay once, which is the signature of a scheduling or image-pull wait for the player pods rather than a per-pod cost. The spans cannot say which, because player pods have no dispatch spans (section 8).
+
+The eight slowest episodes also expose a defect in the outside view. The worker ends `first_step_s` when its viewer socket delivers a first message after every player pod has started. In these eight it did so 10.3 to 11.7 s after the game had already seen every player's hello, so about 10 s of play was booked as startup, `gameplay_s` came out 6.7 to 9.8 s shorter than the game's own loop, and two of them (`ereq_bc36967e`, `ereq_f44fda14`) recorded a `gameplay_s` of 0. They occur at every slot count, and they are exactly the episodes whose pods took longest to start, so whatever delayed the pods also delayed the worker's detection of them by a further ten seconds; the trace does not say what. Any dashboard that divides `gameplay_s` by episode length inherits the error, and in one episode in ten it is a 10 s error on a 22 s quantity.
+
+The whole-job accounting for the baseline variant, medians of 12 episodes: 1.7 s pending, 13.7 s dispatched, 0.1 s `game_boot_s`, 0.15 s `player_launch_s`, 7.2 s `first_step_s`, 23.3 s `gameplay_s` (of which 22.0 s is the measured loop), 0.5 s `artifact_upload_s`, and 7.8 s of running-stage tail. Those medians sum to 54.5 s; the median of the whole-job span itself is 59 s, and the gap is the parts of each job that no span names. Against the 59 s, play is 37 percent; pod dispatch and player startup together are 35 percent; the tail is 13 percent.
+
+## 7. What this explains of the platform's spans
+
+- `game.bootstrap`: does not measure the game's boot; the inside view does, at 0.55 s, and the game's boot sits inside `dispatched`.
+- `first_step_s`: the player-side and network parts are measured and small; the large remainder is Kubernetes, bounded by both views, and the span over-reports it by about 1.1 s in most episodes and by 10 s in one episode out of ten.
 - `episode.loop`: the per-turn decomposition that spec 0080's `player.turn` and `game.step` describe now exists for the Kubernetes path, in artifacts rather than spans.
-- `episode.finalize`: the game-side and player-side writes are measured; the worker's S3 uploads are not.
+- `episode.finalize` and the running tail: the game-side and player-side writes are measured; the worker's S3 uploads and the 5 to 8 s tail after them are not.
 
 | Platform phase or span | Before | Now measured | Still unobservable |
 |---|---|---|---|
-| `game.bootstrap` (`game_boot_s`) | one duration | process start to first Python line (72 ms), imports (446), config (0.1), server start (23), listen to first health hit (434) | container runtime work before the process, failed health polls |
+| `dispatched` stage, `pod.create`, `container.start` | one duration plus two game-pod spans | the game's boot inside it: process start to listening 572 ms | 9 to 10 s per episode between pod create and worker start not covered by any span; `image.pull` carries no duration |
+| `game.bootstrap` (`game_boot_s`) | one duration | the worker's own startup and one poll; the game's real boot is 572 ms, elsewhere | container runtime work before the process, failed health polls |
 | `player.launch` (`player_launch_s`) | one duration | the game's handling of the worker's contract checks | the pod-create API calls |
-| `first_step_s` (no span) | one duration | player process start (72), imports (243), DNS (4.5), TCP (0.6), upgrade (2.0), listen to slot ready (5.3 s first, 6.7 s last) | scheduling, image pull, init-container polls: 4 to 24 s per slot |
-| `episode.loop` (`gameplay_s`) | one duration | every turn: round trip 1.2 ms, processing, residual 1.1 ms, encode, send awaits, tick lag, staleness, loop lag, GC | worker's artifact polling |
+| `first_step_s` (no span) | one duration | player process start (72), imports (243), DNS (4.5), TCP (0.6), upgrade (2.0), listen to slot ready (5.3 s first, 6.7 s last); about 1.1 s of the span is polling delay, and one episode in ten has the boundary 10 s late | scheduling, image pull, init-container polls: 4 to 24 s per slot |
+| `episode.loop` (`gameplay_s`) | one duration | every turn: round trip 1.2 ms, processing, residual 1.1 ms, encode, send awaits, tick lag, staleness, loop lag, GC; the span exceeds the loop by 1.4 s when its boundary is right | worker's artifact polling |
 | `player.connect` (arena only) | absent on k8s | per-slot DNS, TCP, upgrade, and listen-to-ready | the cold Service path |
 | `player.turn`, `game.step` (arena only) | absent on k8s | full per-turn records in the replay, distributions in results | nothing on the measured path |
 | `episode.finalize` (`artifact_upload_s`) | one duration | replay build and write, player zip PUT | the worker's S3 uploads |
+| running tail after finalize | nothing | nothing inside; 5.6 s median, 28 s max from the spans | log collection, child deletion, termination observation |
 
 The result field names follow the frozen vocabulary (`player_connect_*`, `player_turn_duration*`, `game_step_duration*`, `episode_loop_*`) so a trusted backend reader could emit the frozen metrics from these aggregates without inventing new names (`profiler/game/results.py`, module docstring; `docs/specs/0080-coworld-round-tracing-schema.md` §7 cardinality rules). No such reader exists; that wiring is deliberately outside this work.
 
-## 6. What it cannot explain, and what would
+## 8. What it cannot explain, and what would
 
 - The 4 to 24 s per slot between pod create and player process start.
+- The 9 to 10 s of the `dispatched` stage not covered by the game pod's own spans.
 - Whether the game and a given player landed on the same node.
-- The worker's S3 uploads after the game exits.
+- The running tail after the artifacts are written, 5.6 s at the median and up to 28 s.
 - Whether the initial Service path was cold.
 
-The largest unexplained interval is the one the profiler was structurally unable to touch: pod scheduling and image pull for player pods. It is also the one the platform is best placed to explain, because the Kubernetes API already records pod creation, scheduling, image pull, and container start events, and spec 0080's B4 track emits exactly those as `pod.create`, `node.allocate`, `image.pull`, and `container.start` spans for the game pod. Its implementation note says player pods sit outside the watcher's pod selector, so those spans are game-pod-only (`docs/specs/0080-coworld-round-tracing-schema.md`, 2026-08-25 revision note). Extending the watcher to player pods would explain the remaining startup time with no change to the game contract.
+The largest unexplained interval is the one the profiler was structurally unable to touch: pod scheduling and image pull for player pods. It is also the one the platform is best placed to explain, because the Kubernetes API already records pod creation, scheduling, image pull, and container start events, and spec 0080's B4 track emits exactly those as `pod.create`, `node.allocate`, `image.pull`, and `container.start` spans for the game pod. Its implementation note says player pods sit outside the watcher's pod selector, so those spans are game-pod-only (`docs/specs/0080-coworld-round-tracing-schema.md`, 2026-08-25 revision note). Extending the watcher to player pods would explain the remaining startup time with no change to the game contract. The same spans for the game pod need attention first: `image.pull` was emitted for 21 of 96 jobs with a zero duration and `cache_hit=false` on every one, and `container.start` is at one-second resolution, so the game pod's own dispatch is only partly explained.
 
 Node placement is the second gap. The Service path is measured, but the residual would differ for a player on the game's own node versus another node, and the profiler cannot tell which it got. Joining pod placement from the Kubernetes API to the per-slot residuals in these artifacts would answer that directly.
 
-## 7. Platform behaviour observed along the way
+## 9. Platform behaviour observed along the way
 
-- A player container that exits at startup yields a `completed` episode with a 0 score and no failure marker.
+- A player container that exits at startup yields a `completed` episode with a 0 score and no failure marker, and its 180 s wait is booked as `gameplay_s`.
 - `coworld upload-policy` treats each `--run` value as one argv token, spaces included.
 - The policy upload completion endpoint returned HTTP 500 once and succeeded on an identical retry.
 - The certification fixture must run every bundled player, which is not stated in the authoring docs.
+- The Datadog spans API rate-limits trace fetches at roughly two requests per second, which matters for any tool that walks one trace per job.
 
-The first of these matters beyond this project. In round 1 the busy player exited with an argparse error before connecting. The game waited its full `player_connect_timeout_seconds` of 180 s, started with the seat empty, and finished normally. The platform recorded each of those episodes as `completed` with a score of 0 for the missing policy and no `error_type`, `failed_policy_index`, or `failed_agent_index`. Only the game's own results (`slots[0].connected == false`) and the missing policy artifact for that slot reveal what happened. A real league would have charged that policy nine losses and three minutes of cluster time per episode without a signal that the container never ran.
+The first of these matters beyond this project. In round 1 the busy player exited with an argparse error before connecting. The game waited its full `player_connect_timeout_seconds` of 180 s, started with the seat empty, and finished normally. The platform recorded each of those episodes as `completed` with a score of 0 for the missing policy and no `error_type`, `failed_policy_index`, or `failed_agent_index`. Only the game's own results (`slots[0].connected == false`) and the missing policy artifact for that slot reveal what happened, and in Datadog the wait appears as 194 s of gameplay. A real league would have charged that policy nine losses and three minutes of cluster time per episode without a signal that the container never ran.
 
-## 8. Recommendations
+## 10. Recommendations
 
 - Treat pod-to-pod websocket transport as a solved question at about 1 ms per turn for observations up to 256 KiB. It is not where hosted episode time goes. JSON encode and decode are a separate cost that reaches about 10 ms, half a 20 ms tick, at 256 KiB, so observation size still matters even though the wire does not.
 - For games with multi-megabyte frames, measure the player-side reassembly cost, because that, not the wire, is the 200 ms.
-- Extend the pod watcher to player pods so `image.pull` and `container.start` spans cover the 4 to 24 s per slot that dominates `first_step_s`.
-- Surface a crashed player container as an episode failure rather than a completed episode with a zero score.
+- Rename or re-anchor `game_boot_s`. It measures the worker's startup, not the game's, and it hides the game's real boot inside the `dispatched` stage.
+- Extend the pod watcher to player pods so `image.pull` and `container.start` spans cover the 4 to 24 s per slot that dominates `first_step_s`, and fix the game pod's `image.pull` span, which carries no duration today.
+- Add a span for the running-stage tail after `episode.finalize`. It is 5.6 s at the median and 28 s at worst, a tenth of a baseline job, and nothing names it.
+- Anchor the end of `first_step_s` on an event the worker observes directly, or record the boundary's own timestamp, so that a slow viewer read cannot move 10 s of gameplay into startup as it did in 8 of 76 episodes here.
+- Surface a crashed player container as an episode failure rather than a completed episode with a zero score and 180 s of phantom gameplay.
 - Decide deliberately whether player pods should have a CPU quota; today they do not.
-- Keep the profiler as a standing tool: one experience request per variant reproduces every table here in about ten minutes.
+- Keep the profiler as a standing tool: one experience request per variant reproduces every table here in about ten minutes, and `tools/fetch_spans.py` plus `tools/reconcile_spans.py` reproduce the join.
 
 ## Appendix A: reproducing the numbers
+
+- Hosted episodes are requested per variant, downloaded per episode, and aggregated by the tools in `tools/`.
+- The span join needs Datadog read access through the token broker; everything else needs only the coworld CLI login.
 
 From the profiler checkout, with the coworld CLI from the metta checkout:
 
@@ -456,11 +533,16 @@ uv run --project ~/coding/metta python tools/request_experiments.py \
   --episodes 2 > tmp/xreqs.tsv
 uv run --project ~/coding/metta python tools/summarize_experiments.py tmp/xreqs.tsv --out tmp/hosted
 uv run python tools/aggregate_rounds.py tmp/hosted:round
+python3 ~/coding/metta/scripts/token_broker_client.py exec --scope datadog.read \
+  --reason "reconcile profiler episodes with lifecycle spans" -- python3 tools/fetch_spans.py tmp/jobs.json tmp/spans
+uv run python tools/reconcile_spans.py tmp/spans tmp/hosted
 ```
 
-`tools/fetch_episode.py` downloads a single episode's results, replay, and player zips; `tools/analyze_replay.py` prints the headline numbers from any of the three. The per-turn records are in the replay (`turn` records) and in each zip's `turns.jsonl`.
+`tools/fetch_episode.py` downloads a single episode's results, replay, and player zips; `tools/analyze_replay.py` prints the headline numbers from any of the three. The per-turn records are in the replay (`turn` records) and in each zip's `turns.jsonl`. `tools/report_charts.py` draws the charts in this report from the aggregate numbers.
 
 ## Appendix B: field glossary
+
+- Every quantity in the report is defined here in one line; the full field reference with formulas is `docs/measurement-reference.md`.
 
 The full field reference is `docs/measurement-reference.md`. The terms used in this report:
 
@@ -476,8 +558,12 @@ The full field reference is `docs/measurement-reference.md`. The terms used in t
 | slot ready | the moment the player's `hello` reached the game, on the game's clock, relative to when the game started listening |
 | slot-episode | one player slot's data from one episode; 244 echo slot-episodes means 244 (slot, episode) pairs |
 | bound width | the width of the interval [T3 - T4, T2 - T1] within which the clock offset must lie without assuming symmetric delay; the probe's own uncertainty |
+| stage | one of the job's three lifecycle stages in Datadog: `pending` (created to claimed), `dispatched` (claimed to worker start), `running` (worker start to terminal) |
+| running tail | the part of the `running` stage after the `episode.finalize` span ends |
 
 ## Appendix C: episode requests
+
+- Every hosted episode used in the report, by experience request id, so any number can be traced to its raw artifacts.
 
 Round 1 (busy slot absent, startup tables only): experience requests `xreq_9f13c600`, `xreq_ae3d919d`, `xreq_051ba6dc`, `xreq_4ff8c270`, `xreq_37f28745`, `xreq_b4fb3be7`, `xreq_3fea4d83`, `xreq_6258c93c`, `xreq_6bfe3480`; smoke episodes `ereq_290f7936`, `ereq_89a36168`, `ereq_8a7405b3`, `ereq_c000f207`, `ereq_c082a437`.
 
@@ -485,13 +571,13 @@ Round 2: `xreq_07a5d464`, `xreq_c30fdeff`, `xreq_b0db21a8`, `xreq_a7112d58`, `xr
 
 Rounds 3 to 5: `xreq_bd442195`, `xreq_03b3209a`, `xreq_fde769b6`, `xreq_808d8244`, `xreq_405b592d`, `xreq_03c3ed2d`, `xreq_d0b3e1a2`, `xreq_a8ebb9e9`, `xreq_bac3b7f5`, `xreq_2fb8f653`, `xreq_9141152d`, `xreq_ebafa9d3`, `xreq_8f4a567d`, `xreq_43836e3d`, `xreq_cb2fd578`, `xreq_2fe4102e`, `xreq_51642434`, `xreq_ef78c797`, `xreq_dae0d640`, `xreq_7cbdab80`, `xreq_6d0ad9f3`, `xreq_373f25bf`, `xreq_5bad52b0`, `xreq_a6c33e45`, `xreq_b3851916`, `xreq_92fe2a59`, `xreq_674846b9`.
 
-The disturbed long episode discussed in 4.1 is `ereq_2c9d462c`.
+The disturbed long episode discussed in 5.1 is `ereq_2c9d462c`. Its job's lifecycle trace is `6aa19f4e0000000048dd5ba46dcf5b23`.
 
 ## Sources
 
 - metta `packages/coworld/src/coworld/runner/phase_timings.py:18-31` — the five worker phases.
 - metta `packages/coworld/src/coworld/runner/kubernetes_runner.py:95-96, 135-150, 802-872, 1053-1058, 1131-1150, 1756` — poll cadence, init container, phase stamping, CPU limit, player Service URL.
-- metta `app_backend/src/metta/app_backend/job_lifecycle_trace.py:284-345` — phase durations to spans; `first_step_s` has no span.
+- metta `app_backend/src/metta/app_backend/job_lifecycle_trace.py:284-345, 420-432, 595-627` — phase durations to spans, `first_step_s` has no span, the game-pod dispatch spans.
 - metta `app_backend/src/metta/app_backend/arena_runner/pump.py:149-158` — arena's `player.turn` and `game.step`.
 - metta `app_backend/src/metta/app_backend/job_runner/dispatcher.py:940-948` — hosted games get `file://` targets.
 - metta `docs/specs/0080-coworld-round-tracing-schema.md` §1, §3, §6, §7 and the 2026-08-25 revision note — coverage, agentless rule, frozen vocabulary, arena-only status, player pods outside the watcher.
@@ -509,8 +595,9 @@ The disturbed long episode discussed in 4.1 is `ereq_2c9d462c`.
 - coworld-profiler `profiler/resources.py` — cgroup, loop lag, GC sampling.
 - coworld-profiler `profiler/game/results.py` — result fields and vocabulary.
 - coworld-profiler `profiler/game/server.py` — bootstrap stamps and finalize.
-- coworld-profiler `profiler/payload.py` — payload generation and its fix.
+- coworld-profiler `profiler/payload.py` — payload generation.
 - coworld-profiler `profiler/protocol.py` — message shapes.
 - coworld-profiler `coworld_manifest_template.json` — variants, players, certification fixture.
 - coworld-profiler `docs/measurement-reference.md` — field-by-field meaning.
-- coworld-profiler `tools/aggregate_rounds.py`, `tools/request_experiments.py`, `tools/summarize_experiments.py`, `tools/fetch_episode.py` — how the data was produced.
+- coworld-profiler `tools/aggregate_rounds.py`, `tools/request_experiments.py`, `tools/summarize_experiments.py`, `tools/fetch_episode.py` — how the inside data was produced.
+- coworld-profiler `tools/fetch_spans.py`, `tools/reconcile_spans.py`, `tools/report_charts.py` — how the spans were fetched, joined, and charted.
