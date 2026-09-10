@@ -78,6 +78,7 @@ def test_reconciliation_retains_container_and_player_groups():
     ]
     view = reconcile_spans.worker_view({"spans": spans + [spans[0]]})
     assert len(view["span_groups"]) == 4
+    assert "container.run" not in view["ambiguous_names"]
     assert view["image.pull"] == 5
     assert view["image_pull_count"] == 2
     assert "image.pull" not in view["ambiguous_names"]
@@ -313,6 +314,7 @@ def test_grouping_separates_restart_positions_and_startup_outcomes():
         span["custom"]["player"] = {"startup_outcome": outcome}
     view = reconcile_spans.worker_view({"spans": spans + startup})
     assert len(view["span_groups"]) == 4
+    assert "container.run" not in view["ambiguous_names"]
     assert {key[5] for key in view["span_groups"] if key[0] == "container.run"} == {"previous", "current"}
     assert {key[6] for key in view["span_groups"] if key[0] == "player.startup_observed"} == {"dead", "started"}
 

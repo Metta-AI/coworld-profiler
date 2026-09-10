@@ -121,7 +121,8 @@ An empty trace response is reported and leaves the previous snapshot untouched.
 Startup summaries separate legacy worker-entry-to-health from explicit
 container-start-to-health intervals. Position-derived cleanup gaps are calculated
 only for explicit timing records; old reconstructed positions are not evidence
-of contiguous work. Timestamp markers have a count table, not duration averages.
+of contiguous work. The upload-to-running-stage-end gap crosses worker and database
+clocks, so clock offsets can affect it. Timestamp markers have a count table, not duration averages.
 Container attempts and player startup outcomes are separate distribution groups.
 Nested spans overlap: worker bootstrap contains setup, and viewer wait contains
 player startup wait. Do not add these rows to estimate elapsed time.

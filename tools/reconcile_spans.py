@@ -63,7 +63,7 @@ def worker_view(trace: dict) -> dict:
             key = span["operation_name"] + (":" + (span["resource_name"] or "-") if span["operation_name"] == "job.stage" else "")
             by_name.setdefault(key, []).append(span)
     single = {key: spans[0] for key, spans in by_name.items() if len(spans) == 1}
-    view: dict = {"span_groups": groups, "ambiguous_names": sorted(key for key, spans in by_name.items() if len(spans) > 1 and key != "image.pull")}
+    view: dict = {"span_groups": groups}
     for key in (
         "job.stage:pending",
         "job.stage:dispatched",
@@ -81,6 +81,7 @@ def worker_view(trace: dict) -> dict:
     ):
         span = single.get(key)
         view[key] = span["duration_s"] if span else None
+    view["ambiguous_names"] = sorted(key for key, spans in by_name.items() if key in view and len(spans) > 1)
     bootstrap = single.get("game.bootstrap")
     boundary = ((bootstrap["custom"].get("timing") or {}).get("boundary")) if bootstrap else None
     view["legacy_bootstrap_s"] = view["game.bootstrap"] if bootstrap and not explicit_runtime else None
