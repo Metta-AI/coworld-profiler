@@ -85,8 +85,9 @@ requested time window. This does not prove that every original span was retained
 Use `--refresh` to refetch existing files after late spans arrive, and
 `--from 2026-09-09T00:00:00Z --to 2026-09-10T00:00:00Z` for an older window.
 Timeouts or partial-result warnings fail the run before replacing that job's saved trace.
-The run stops on the first error. Completed jobs are checkpointed in the index;
-fix the query or use a filtered jobs file to continue past an ambiguous job. Refresh merges by span ID, preserving
+The run stops on the first error. Completed files remain indexed after an error. Refresh still revisits every
+listed job; use a filtered jobs file to resume a refresh. Fix ambiguous queries
+before retrying. Refresh merges by span ID, preserving
 older spans outside the query window. Missing roots retain previous files with a
 warning. Trace files and the index are replaced atomically.
 A completed fetch does not prove that Datadog has finished indexing late spans.
@@ -100,14 +101,26 @@ broker with a session ID and the `datadog.read` scope; never save API keys.
 Pod role and identity, player slot, and resource. UID is preferred, followed by
 Pod name or span ID when older records lack a Pod identifier. Missing slots
 remain unknown. The distribution table aggregates across recorded Pods. Repeated names never silently choose the
-last container or player. Ambiguous single-span summaries are omitted. Game-pod
+last container or player. Ambiguous single-span summaries are omitted and counted; their records remain
+in the resource distributions instead of being combined into one duration. Game-pod
 image-pull totals sum container durations; overlapping pulls are not elapsed job
 time. Explicit viewer waits and historical derived gaps are reported separately; neither
 measures the game's first turn. The separate player-startup interval measures the
 worker's status observation, not a player handshake.
 
-The resource table also understands the accompanying Metta instrumentation's
-`container.run`, `player.pod_create`, and `player.startup_observed` operations.
+The resource table supports `container.run`, `player.pod_create`, and
+`player.startup_observed` from companion Metta PRs
+[#22417](https://github.com/Metta-AI/metta/pull/22417) and
+[#22406](https://github.com/Metta-AI/metta/pull/22406). These are implemented
+changes awaiting merge and deployment, not fields present in historical traces.
 Older saved traces do not contain those records. The aggregate startup gate
 (`player.startup_wait`) and each player's observed startup are different intervals.
 An empty trace response is reported and leaves the previous snapshot untouched.
+
+Startup summaries separate legacy worker-entry-to-health from explicit
+container-start-to-health intervals. Position-derived cleanup gaps are calculated
+only for explicit timing records; old reconstructed positions are not evidence
+of contiguous work. Timestamp markers have a count table, not duration averages.
+Container attempts and player startup outcomes are separate distribution groups.
+Nested spans overlap: worker bootstrap contains setup, and viewer wait contains
+player startup wait. Do not add these rows to estimate elapsed time.

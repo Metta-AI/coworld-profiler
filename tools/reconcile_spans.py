@@ -39,6 +39,7 @@ def q(vals: list[float | None], pct: float) -> float | None:
 def worker_view(trace: dict) -> dict:
     groups: dict[tuple, list[dict]] = {}
     by_name: dict[str, list[dict]] = {}
+    explicit_runtime = any((span["custom"].get("timing") or {}).get("source") == "worker_artifact" for span in trace["spans"])
     seen = set()
     for span in trace["spans"]:
         if span["span_id"] in seen:
@@ -52,12 +53,14 @@ def worker_view(trace: dict) -> dict:
             pod.get("uid") or pod.get("name") or span["span_id"],
             player.get("slot"),
             span["resource_name"],
+            (span["custom"].get("container") or {}).get("run_position"),
+            player.get("startup_outcome"),
         )
         groups.setdefault(identity, []).append(span)
         # Historical game-only traces have no role tag. Player spans never enter
         # the game-pod summary, and repeated names are never resolved by order.
         if pod.get("role") != "player":
-            key = span["operation_name"] + (":" + span["resource_name"] if span["operation_name"] == "job.stage" else "")
+            key = span["operation_name"] + (":" + (span["resource_name"] or "-") if span["operation_name"] == "job.stage" else "")
             by_name.setdefault(key, []).append(span)
     single = {key: spans[0] for key, spans in by_name.items() if len(spans) == 1}
     view: dict = {"span_groups": groups, "ambiguous_names": sorted(key for key, spans in by_name.items() if len(spans) > 1 and key != "image.pull")}
@@ -78,15 +81,20 @@ def worker_view(trace: dict) -> dict:
     ):
         span = single.get(key)
         view[key] = span["duration_s"] if span else None
+    bootstrap = single.get("game.bootstrap")
+    boundary = ((bootstrap["custom"].get("timing") or {}).get("boundary")) if bootstrap else None
+    view["legacy_bootstrap_s"] = view["game.bootstrap"] if bootstrap and not explicit_runtime else None
+    view["container_bootstrap_s"] = view["game.bootstrap"] if boundary == "container_started_to_health_observed" else None
     pulls = by_name.get("image.pull", [])
     view["image.pull"] = sum(span["duration_s"] for span in pulls) if pulls else None
     view["image_pull_count"] = len(pulls)
     launch, loop = single.get("player.launch"), single.get("episode.loop")
-    viewer = single.get("worker.viewer_wait")
-    view["first_step_s"] = (ts(loop["start"]) - ts(launch["end"])) if not viewer and launch and loop else None
+    view["first_step_s"] = (
+        (ts(loop["start"]) - ts(launch["end"])) if not explicit_runtime and "worker.viewer_wait" not in by_name and launch and loop else None
+    )
     finalize, running = single.get("episode.finalize"), single.get("job.stage:running")
-    view["post_loop_gap_s"] = (ts(finalize["start"]) - ts(loop["end"])) if finalize and loop else None
-    view["running_tail_s"] = (ts(running["end"]) - ts(finalize["end"])) if finalize and running else None
+    view["post_loop_gap_s"] = (ts(finalize["start"]) - ts(loop["end"])) if explicit_runtime and finalize and loop else None
+    view["running_tail_s"] = (ts(running["end"]) - ts(finalize["end"])) if explicit_runtime and finalize and running else None
     hits = [(pull["custom"].get("image") or {}).get("cache_hit") for pull in pulls]
     view["image_cache_hits"] = hits
     node = single.get("node.allocate")
@@ -154,15 +162,16 @@ def main(spans_dir: str, *result_dirs: str) -> None:
         ("container.start", "container.start (game pod)"),
         ("worker.bootstrap", "worker process bootstrap"),
         ("job.stage:running", "stage running"),
-        ("game.bootstrap", "game.bootstrap (see timing.boundary for source semantics)"),
+        ("legacy_bootstrap_s", "legacy worker entry to health observation"),
+        ("container_bootstrap_s", "container start to health observation (upper bound)"),
         ("player.launch", "player.launch (player_launch_s)"),
         ("first_step_s", "historical launch-to-loop gap (legacy traces only)"),
         ("worker.viewer_wait", "explicit viewer wait (timestamped traces only)"),
         ("player.startup_wait", "player processes started or failed: worker observation"),
         ("episode.loop", "episode.loop (gameplay_s)"),
-        ("post_loop_gap_s", "gap between episode.loop end and episode.finalize start"),
+        ("post_loop_gap_s", "explicit loop-to-upload gap"),
         ("episode.finalize", "episode.finalize (artifact_upload_s)"),
-        ("running_tail_s", "running stage after episode.finalize ends"),
+        ("running_tail_s", "explicit upload-to-running-stage-end gap"),
         ("lifecycle_s", "whole job"),
     ]:
         vals = [x[key] for x in rows if x.get(key) is not None]
@@ -173,32 +182,37 @@ def main(spans_dir: str, *result_dirs: str) -> None:
     pull_jobs = sum(row["image_pull_count"] > 0 for row in rows)
     print(f"\nimage.pull emitted for {pull_jobs} jobs; per-container cache_hit values: {dict(hits)}")
 
-    print("\n## Container and player distributions (ms; grouped by role, resource and slot)\n")
-    print("| operation | role | resource | slot | median | p90 | records |")
-    print("|---|---|---|---|---|---|---|")
-    resources: dict[tuple[str, str, str, str], list[float]] = {}
+    print("\n## Container and player durations (ms)\n")
+    print("| operation | role | resource | slot | run position | startup outcome | median | p90 | records |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    resources: dict[tuple[str, ...], list[float]] = {}
+    markers: Counter[tuple[str, ...]] = Counter()
     for row in rows:
-        for (operation, role, _uid, slot, resource), spans in row["span_groups"].items():
-            if operation not in {
+        for (operation, role, _uid, slot, resource, run_position, outcome), spans in row["span_groups"].items():
+            key = (operation, role or "unknown", resource or "-", str(slot) if slot is not None else "-", run_position or "-", outcome or "-")
+            if operation in {"pod.created", "container.started", "container.finished"}:
+                markers[key] += len(spans)
+            elif operation in {
                 "pod.create",
                 "player.pod_create",
                 "image.pull",
                 "container.start",
                 "container.run",
-                "container.started",
-                "container.finished",
                 "node.allocate",
                 "player.startup_observed",
             }:
-                continue
-            key = (operation, role or "unknown", resource or "-", str(slot) if slot is not None else "-")
-            resources.setdefault(key, []).extend(span["duration_s"] for span in spans)
-    for (operation, role, resource, slot), values in sorted(resources.items()):
-        print(f"| {operation} | {role} | {resource} | {slot} | {ms(med(values))} | {ms(q(values, 90))} | {len(values)} |")
+                resources.setdefault(key, []).extend(span["duration_s"] for span in spans)
+    for key, values in sorted(resources.items()):
+        print(f"| {' | '.join(key)} | {ms(med(values))} | {ms(q(values, 90))} | {len(values)} |")
+    print("\n## Timestamp markers (counts, not measured durations)\n")
+    print("| operation | role | resource | slot | run position | startup outcome | records |")
+    print("|---|---|---|---|---|---|---|")
+    for key, count in sorted(markers.items()):
+        print(f"| {' | '.join(key)} | {count} |")
 
     print("\n## Inside versus outside, per episode (ms), clean episodes\n")
     print(
-        "| episode | slots | worker game_boot_s | game: process start to listen | "
+        "| episode | slots | legacy worker entry to health | container to health bound | game: process start to listen | "
         "game: listen to first /healthz | worker first_step_s | game: first /global "
         "to last slot ready | worker gameplay_s | game: measured loop | difference "
         "gameplay minus loop |"
@@ -208,7 +222,7 @@ def main(spans_dir: str, *result_dirs: str) -> None:
         g2r = (x["g_last_ready"] - x["g_listen_to_global"]) if x["g_last_ready"] is not None and x["g_listen_to_global"] is not None else None
         diff = (x["episode.loop"] - x["g_loop"]) if x["episode.loop"] is not None and x["g_loop"] is not None else None
         print(
-            f"| {x['ereq']} | {x['slots']} | {ms(x['game.bootstrap'])} | {ms(x['g_boot_inside'])} "
+            f"| {x['ereq']} | {x['slots']} | {ms(x['legacy_bootstrap_s'])} | {ms(x['container_bootstrap_s'])} | {ms(x['g_boot_inside'])} "
             f"| {ms(x['g_listen_to_health'])} | {ms(x['first_step_s'])} | {ms(g2r)} | "
             f"{ms(x['episode.loop'])} | {ms(x['g_loop'])} | {ms(diff)} |"
         )

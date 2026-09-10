@@ -69,7 +69,7 @@ def search(query: str, *, limit: int, window: str = "now-48h", until: str | None
         for span in page["data"]:
             spans[(span["attributes"]["trace_id"], span["attributes"]["span_id"])] = span
         cursor = metadata.get("page", {}).get("after")
-        if not page["data"] or not cursor:
+        if not cursor:
             return list(spans.values())
         if cursor in cursors:
             raise RuntimeError("Datadog repeated a pagination cursor")
@@ -136,18 +136,19 @@ def main(jobs_path: str, out_dir: str, *, refresh: bool = False, window: str = "
                     if k
                     in (
                         "pod",
+                        "container",
+                        "dispatch",
                         "node",
                         "image",
                         "player",
+                        "player_file",
                         "replay",
                         "step_count",
                         "coworld",
                         "job",
                         "episode_request",
                         "timing",
-                        "init",
                         "spec",
-                        "worker",
                     )
                 },
             }

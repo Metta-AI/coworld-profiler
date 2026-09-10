@@ -169,11 +169,11 @@ def test_refresh_preserves_older_spans_outside_window(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fetch_spans,
         "search",
-        lambda query, **kwargs: [{"attributes": {"trace_id": "trace"}}] if query.startswith("@job.id") else [],
+        lambda query, **kwargs: [{"attributes": {"trace_id": "trace"}}] if query.startswith("@job.id") else [_api_span("new")],
     )
     monkeypatch.setattr(fetch_spans.time, "sleep", lambda _: None)
     fetch_spans.main(str(jobs), str(tmp_path), refresh=True)
-    assert [span["span_id"] for span in json.loads(target.read_text())["spans"]] == ["older"]
+    assert [span["span_id"] for span in json.loads(target.read_text())["spans"]] == ["older", "new"]
     assert not target.with_suffix(".json.tmp").exists()
 
 
@@ -211,18 +211,19 @@ def test_multiple_lifecycle_traces_fail_without_replacing_saved_trace(tmp_path, 
     assert target.read_bytes() == original
 
 
-def test_empty_last_page_with_cursor_finishes(monkeypatch):
+def test_empty_page_with_cursor_continues_until_cursor_ends(monkeypatch):
     pages = iter(
         [
             {"data": [_api_span("first")], "meta": {"page": {"after": "next"}}},
             {"data": [], "meta": {"page": {"after": "empty-page-cursor"}}},
+            {"data": [_api_span("last")], "meta": {}},
         ]
     )
     monkeypatch.setattr(fetch_spans, "_search_page", lambda _: next(pages))
-    assert len(fetch_spans.search("trace_id:trace", limit=1)) == 1
+    assert [span["attributes"]["span_id"] for span in fetch_spans.search("trace_id:trace", limit=1)] == ["first", "last"]
 
 
-def test_refresh_preserves_unlisted_index_entries(tmp_path, monkeypatch):
+def test_refresh_preserves_unlisted_index_entries(tmp_path):
     jobs = tmp_path / "jobs.json"
     jobs.write_text("[]")
     (tmp_path / "prior-job.json").write_text("{}")
@@ -244,3 +245,105 @@ def test_first_fetch_with_empty_trace_does_not_save_snapshot(tmp_path, monkeypat
 def test_naive_window_is_rejected_with_timezone_message(tmp_path):
     with pytest.raises(ValueError, match="timezone"):
         fetch_spans.main(str(tmp_path / "jobs.json"), str(tmp_path), window="2026-09-08T00:00:00")
+
+
+def test_multiple_viewer_observations_do_not_reenable_historical_gap():
+    spans = [
+        _span("launch", name="player.launch"),
+        _span("loop", name="episode.loop"),
+        _span("viewer-1", name="worker.viewer_wait"),
+        _span("viewer-2", name="worker.viewer_wait"),
+    ]
+    view = reconcile_spans.worker_view({"spans": spans})
+    assert view["worker.viewer_wait"] is None
+    assert view["first_step_s"] is None
+    assert "worker.viewer_wait" in view["ambiguous_names"]
+
+
+def test_refresh_rejects_changed_trace_identity_without_replacing_file(tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps([{"job_id": "job", "ereq": "episode", "round": "round2"}]))
+    target = tmp_path / "job.json"
+    target.write_text(json.dumps({"trace_id": "old-trace", "spans": [_span("older")]}))
+    before = target.read_bytes()
+    monkeypatch.setattr(fetch_spans, "search", lambda *args, **kwargs: [_api_span("new")])
+    with pytest.raises(ValueError, match="saved trace ID differs"):
+        fetch_spans.main(str(jobs), str(tmp_path), refresh=True)
+    assert target.read_bytes() == before
+
+
+def test_fetch_preserves_container_and_dispatch_evidence(tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps([{"job_id": "job", "ereq": "episode", "round": "round2"}]))
+    span = _api_span("run")
+    span["attributes"]["custom"].update(container={"exit_code": 137}, dispatch={"attempt_id": "attempt"}, player_file={"count": 2})
+    monkeypatch.setattr(fetch_spans, "search", lambda *args, **kwargs: [span])
+    monkeypatch.setattr(fetch_spans.time, "sleep", lambda _: None)
+    fetch_spans.main(str(jobs), str(tmp_path))
+    saved = json.loads((tmp_path / "job.json").read_text())["spans"][0]
+    assert saved["custom"]["container"] == {"exit_code": 137}
+    assert saved["custom"]["dispatch"] == {"attempt_id": "attempt"}
+    assert saved["custom"]["player_file"] == {"count": 2}
+
+
+def test_explicit_and_legacy_startup_positions_remain_separate():
+    bootstrap = _span("boot", name="game.bootstrap", seconds=4)
+    launch, loop = _span("launch", name="player.launch"), _span("loop", name="episode.loop")
+    finalize = _span("upload", name="episode.finalize", seconds=1)
+    finalize.update(start="2026-09-09T00:00:03Z", end="2026-09-09T00:00:04Z")
+    spans = [bootstrap, launch, loop, finalize]
+    old = reconcile_spans.worker_view({"spans": spans})
+    assert old["legacy_bootstrap_s"] == 4 and old["container_bootstrap_s"] is None
+    assert old["post_loop_gap_s"] is None
+    for span in spans:
+        span["custom"]["timing"] = {"source": "worker_artifact"}
+    bootstrap["custom"]["timing"]["boundary"] = "container_started_to_health_observed"
+    new = reconcile_spans.worker_view({"spans": spans})
+    assert new["legacy_bootstrap_s"] is None and new["container_bootstrap_s"] == 4
+    assert new["first_step_s"] is None
+    assert new["post_loop_gap_s"] == 1
+
+
+def test_grouping_separates_restart_positions_and_startup_outcomes():
+    spans = [_span("old", name="container.run"), _span("current", name="container.run")]
+    spans[0]["custom"]["container"] = {"run_position": "previous"}
+    spans[1]["custom"]["container"] = {"run_position": "current"}
+    startup = [_span("dead", name="player.startup_observed", role="player"), _span("started", name="player.startup_observed", role="player")]
+    for span, outcome in zip(startup, ("dead", "started"), strict=True):
+        span["custom"]["player"] = {"startup_outcome": outcome}
+    view = reconcile_spans.worker_view({"spans": spans + startup})
+    assert len(view["span_groups"]) == 4
+    assert {key[5] for key in view["span_groups"] if key[0] == "container.run"} == {"previous", "current"}
+    assert {key[6] for key in view["span_groups"] if key[0] == "player.startup_observed"} == {"dead", "started"}
+
+
+def test_timestamp_markers_are_counts_not_duration_statistics(tmp_path, capsys):
+    traces, results = tmp_path / "traces", tmp_path / "results"
+    traces.mkdir()
+    episode = results / "ereq_test"
+    episode.mkdir(parents=True)
+    marker = _span("marker", name="container.started", seconds=0)
+    (traces / "job.json").write_text(json.dumps({"job_id": "job", "round": "round2", "spans": [marker]}))
+    (episode / "episode.json").write_text(json.dumps({"job_id": "job"}))
+    values = {
+        key: None
+        for key in [
+            "game_listening_to_first_health_s",
+            "game_listening_to_first_global_s",
+            "game_process_birth_to_first_mark_s",
+            "game_bootstrap_import_s",
+            "game_bootstrap_config_read_s",
+            "game_bootstrap_config_decode_s",
+            "game_bootstrap_payload_build_s",
+            "game_bootstrap_server_start_s",
+            "episode_loop_measurement_s",
+            "replay_prepare_s",
+        ]
+    }
+    values.update(slots=[], player_slot_count=1, step_count=1, mode="echo")
+    (episode / "results.json").write_text(json.dumps(values))
+    reconcile_spans.main(str(traces), str(results))
+    output = capsys.readouterr().out
+    durations, markers = output.split("## Timestamp markers")
+    assert "container.started" not in durations
+    assert "| container.started | game | worker | - | - | - | 1 |" in markers
