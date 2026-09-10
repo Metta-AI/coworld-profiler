@@ -101,8 +101,9 @@ broker with a session ID and the `datadog.read` scope; never save API keys.
 Pod role and identity, player slot, and resource. UID is preferred, followed by
 Pod name or span ID when older records lack a Pod identifier. Missing slots
 remain unknown. The distribution table aggregates across recorded Pods. Repeated names never silently choose the
-last container or player. Ambiguous single-span summaries are omitted and counted; their records remain
-in the resource distributions instead of being combined into one duration. Game-pod
+last container or player. Ambiguous single-span summaries are omitted and counted. Container and player records
+remain in the resource distributions; other ambiguous operations appear only in the
+omission counts. Game-pod
 image-pull totals sum container durations; overlapping pulls are not elapsed job
 time. Explicit viewer waits and historical derived gaps are reported separately; neither
 measures the game's first turn. The separate player-startup interval measures the

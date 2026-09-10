@@ -213,53 +213,50 @@ def main(spans_dir: str, *result_dirs: str) -> None:
     print("\n## Inside versus outside, per episode (ms), clean episodes\n")
     print(
         "| episode | slots | legacy worker entry to health | container to health bound | game: process start to listen | "
-        "game: listen to first /healthz | worker first_step_s | game: first /global "
+        "game: listen to first /healthz | legacy launch-to-loop gap | explicit viewer wait | game: first /global "
         "to last slot ready | worker gameplay_s | game: measured loop | difference "
         "gameplay minus loop |"
     )
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for x in sorted(clean, key=lambda x: (x["slots"], x["ereq"])):
         g2r = (x["g_last_ready"] - x["g_listen_to_global"]) if x["g_last_ready"] is not None and x["g_listen_to_global"] is not None else None
         diff = (x["episode.loop"] - x["g_loop"]) if x["episode.loop"] is not None and x["g_loop"] is not None else None
         print(
             f"| {x['ereq']} | {x['slots']} | {ms(x['legacy_bootstrap_s'])} | {ms(x['container_bootstrap_s'])} | {ms(x['g_boot_inside'])} "
-            f"| {ms(x['g_listen_to_health'])} | {ms(x['first_step_s'])} | {ms(g2r)} | "
+            f"| {ms(x['g_listen_to_health'])} | {ms(x['first_step_s'])} | {ms(x['worker.viewer_wait'])} | {ms(g2r)} | "
             f"{ms(x['episode.loop'])} | {ms(x['g_loop'])} | {ms(diff)} |"
         )
 
     print("\n## Reconciliation medians, clean episodes (ms)\n")
-    fs = [x["first_step_s"] for x in clean if x["first_step_s"] is not None]
-    g2r_all = [(x["g_last_ready"] - x["g_listen_to_global"]) for x in clean if x["g_last_ready"] is not None and x["g_listen_to_global"] is not None]
-    pairs = [
-        (x["first_step_s"], x["g_last_ready"] - x["g_listen_to_global"])
-        for x in clean
-        if x["first_step_s"] is not None and x["g_last_ready"] is not None and x["g_listen_to_global"] is not None
-    ]
-    deltas = [b - a for a, b in pairs]
-    print(f"- worker first_step_s: median {ms(med(fs))}, p90 {ms(q(fs, 90))}, max {ms(max(fs) if fs else None)} (n={len(fs)})")
-    print(
-        f"- game: first /global connect to last slot ready: median {ms(med(g2r_all))}, "
-        f"p90 {ms(q(g2r_all, 90))}, max {ms(max(g2r_all) if g2r_all else None)}"
-    )
-    print(
-        f"- per-episode difference (game interval minus worker first_step_s): median "
-        f"{ms(med(deltas))}, p10 {ms(q(deltas, 10))}, p90 {ms(q(deltas, 90))}"
-    )
-    by_slots: dict[int, list[float]] = {}
-    for x in clean:
-        if x["first_step_s"] is not None:
-            by_slots.setdefault(x["slots"], []).append(x["first_step_s"])
-    print("- worker first_step_s by slot count: " + ", ".join(f"{n} slots {ms(med(v))} (n={len(v)})" for n, v in sorted(by_slots.items())))
-    gb = [
-        (x["game.bootstrap"], x["g_boot_inside"], x["g_listen_to_health"])
-        for x in clean
-        if x["game.bootstrap"] is not None and x["g_listen_to_health"] is not None
-    ]
-    print(
-        f"- worker game_boot_s median {ms(med([a for a, _, _ in gb]))} versus game "
-        f"process start to listen median {ms(med([b for _, b, _ in gb]))} plus listen "
-        f"to first /healthz median {ms(med([c for _, _, c in gb]))}"
-    )
+    for key, label in (
+        ("first_step_s", "legacy launch-to-loop gap"),
+        ("worker.viewer_wait", "explicit viewer wait"),
+    ):
+        values = [x[key] for x in clean if x[key] is not None]
+        pairs = [
+            (x[key], x["g_last_ready"] - x["g_listen_to_global"])
+            for x in clean
+            if x[key] is not None and x["g_last_ready"] is not None and x["g_listen_to_global"] is not None
+        ]
+        deltas = [b - a for a, b in pairs]
+        print(f"- {label}: median {ms(med(values))}, p90 {ms(q(values, 90))}, max {ms(max(values) if values else None)} (n={len(values)})")
+        print(f"- game: first /global to last slot ready, paired with {label}: median {ms(med([b for _, b in pairs]))} (n={len(pairs)})")
+        print(f"- per-episode difference (game interval minus {label}): median {ms(med(deltas))}, p10 {ms(q(deltas, 10))}, p90 {ms(q(deltas, 90))}")
+        by_slots: dict[int, list[float]] = {}
+        for x in clean:
+            if x[key] is not None:
+                by_slots.setdefault(x["slots"], []).append(x[key])
+        print(f"- {label} by slot count: " + ", ".join(f"{n} slots {ms(med(v))} (n={len(v)})" for n, v in sorted(by_slots.items())))
+    for key, label in (
+        ("legacy_bootstrap_s", "legacy worker entry to health"),
+        ("container_bootstrap_s", "container start to health upper bound"),
+    ):
+        gb = [(x[key], x["g_boot_inside"], x["g_listen_to_health"]) for x in clean if x[key] is not None and x["g_listen_to_health"] is not None]
+        print(
+            f"- {label} median {ms(med([a for a, _, _ in gb]))} versus game "
+            f"process start to listen median {ms(med([b for _, b, _ in gb]))} plus listen "
+            f"to first /healthz median {ms(med([c for _, _, c in gb]))} (n={len(gb)})"
+        )
     gl = [(x["episode.loop"], x["g_loop"]) for x in clean if x["episode.loop"] is not None and x["g_loop"] is not None]
     print(
         f"- worker gameplay_s minus game measured loop: median {ms(med([a - b for a, b in gl]))}, "

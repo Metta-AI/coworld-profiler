@@ -347,3 +347,32 @@ def test_timestamp_markers_are_counts_not_duration_statistics(tmp_path, capsys):
     durations, markers = output.split("## Timestamp markers")
     assert "container.started" not in durations
     assert "| container.started | game | worker | - | - | - | 1 |" in markers
+
+
+def test_report_table_columns_and_explicit_reconciliation(tmp_path, capsys):
+    test_timestamp_markers_are_counts_not_duration_statistics(tmp_path, capsys)
+    trace_path = tmp_path / "traces/job.json"
+    trace = json.loads(trace_path.read_text())
+    boot = _span("boot", name="game.bootstrap", seconds=4)
+    boot["custom"]["timing"] = {"source": "worker_artifact", "boundary": "container_started_to_health_observed"}
+    trace["spans"] += [boot, _span("viewer", name="worker.viewer_wait", seconds=2)]
+    trace_path.write_text(json.dumps(trace))
+    values_path = tmp_path / "results/ereq_test/results.json"
+    values = json.loads(values_path.read_text())
+    values["game_listening_to_first_health_s"] = 1
+    values_path.write_text(json.dumps(values))
+    reconcile_spans.main(str(tmp_path / "traces"), str(tmp_path / "results"))
+    output = capsys.readouterr().out
+    width = None
+    for line in output.splitlines():
+        if line.startswith("|"):
+            cells = len(line.split("|")) - 2
+            if width is None:
+                width = cells
+            assert cells == width, line
+        else:
+            width = None
+    assert "explicit viewer wait: median 2,000" in output
+    assert "container start to health upper bound median 4,000" in output
+    assert "legacy worker entry to health median -" in output
+    assert "worker game_boot_s median" not in output
