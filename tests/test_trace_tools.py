@@ -378,3 +378,8 @@ def test_report_table_columns_and_explicit_reconciliation(tmp_path, capsys):
     assert "container start to health upper bound median 4,000" in output
     assert "legacy worker entry to health median -" in output
     assert "worker game_boot_s median" not in output
+
+
+def test_search_accepts_null_final_page(monkeypatch):
+    monkeypatch.setattr(fetch_spans, "_search_page", lambda _: {"data": [_api_span("last")], "meta": {"status": "done", "page": None}})
+    assert [span["attributes"]["span_id"] for span in fetch_spans.search("trace_id:trace", limit=100)] == ["last"]
