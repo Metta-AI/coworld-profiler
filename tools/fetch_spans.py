@@ -68,7 +68,7 @@ def search(query: str, *, limit: int, window: str = "now-48h", until: str | None
             raise RuntimeError("Datadog returned partial span results; saved trace was not replaced")
         for span in page["data"]:
             spans[(span["attributes"]["trace_id"], span["attributes"]["span_id"])] = span
-        cursor = metadata.get("page", {}).get("after")
+        cursor = (metadata.get("page") or {}).get("after")
         if not cursor:
             return list(spans.values())
         if cursor in cursors:
