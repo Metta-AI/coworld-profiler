@@ -30,11 +30,11 @@ uv sync --group dev
 uv run pytest                       # unit + real-process end-to-end tests
 uv run ruff check . && uv run ruff format --check .
 uv run python tools/render_manifest.py
-# The coworld CLI lives in the metta checkout's venv:
-uv run --project ~/coding/metta coworld build --project . --version X.Y.Z
-uv run --project ~/coding/metta coworld run-episode dist/coworld_manifest.json [--variant ID]
-uv run --project ~/coding/metta coworld certify dist/coworld_manifest.json
-uv run --project ~/coding/metta coworld upload-coworld dist/coworld_manifest.json
+# Use the public CLI in its isolated tool environment:
+uvx --from coworld coworld build --project . --version X.Y.Z
+uvx --from coworld coworld run-episode dist/coworld_manifest.json [--variant ID]
+uvx --from coworld coworld certify dist/coworld_manifest.json
+uvx --from coworld coworld upload-coworld dist/coworld_manifest.json
 ```
 
 ## Layout
